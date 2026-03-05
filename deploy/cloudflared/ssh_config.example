@@ -1,0 +1,4 @@
+Host webbvps
+  HostName ssh.vps.webbventures.com.au
+  User root
+  ProxyCommand cloudflared access ssh --hostname %h

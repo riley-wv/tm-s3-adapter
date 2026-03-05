@@ -1,0 +1,25 @@
+tunnel: webbvps
+credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  # Host SSH daemon (for VPS management over Cloudflare Access).
+  - hostname: ssh.vps.webbventures.com.au
+    service: ssh://localhost:22
+
+  # tm-s3-adapter admin dashboard (container port 8787 mapped to localhost host port).
+  - hostname: admin.vps.webbventures.com.au
+    service: http://localhost:8787
+
+  # tm-s3-adapter admin API (container port 8788 mapped to localhost host port).
+  - hostname: api.vps.webbventures.com.au
+    service: http://localhost:8788
+
+  # SMB and SFTP are TCP services. Connect from clients with:
+  # cloudflared access tcp --hostname <hostname> --url localhost:<local-port>
+  - hostname: smb.vps.webbventures.com.au
+    service: tcp://localhost:1445
+
+  - hostname: sftp.vps.webbventures.com.au
+    service: tcp://localhost:2222
+
+  - service: http_status:404

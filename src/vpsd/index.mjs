@@ -1,9 +1,11 @@
 import { createReadStream, createWriteStream } from 'node:fs';
-import { readFile, unlink, utimes } from 'node:fs/promises';
+import { readFile, unlink, utimes, writeFile } from 'node:fs/promises';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { dirname, extname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 import { ensureDir, safeJoin, walkFiles } from '../shared/fsUtils.mjs';
 import { handleError, parseUrl, readJsonBody, sendJson, sendNoContent } from '../shared/http.mjs';
@@ -19,6 +21,10 @@ const adminWebRoot = process.env.VPS_ADMIN_WEB_ROOT || join(process.cwd(), 'web'
 const smbShareRoot = process.env.VPS_SMB_SHARE_ROOT || join(dataDir, 'smb-share');
 const smbPublicPort = Number(process.env.VPS_SMB_PUBLIC_PORT || 445);
 const smbPublicPortFromEnv = process.env.VPS_SMB_PUBLIC_PORT !== undefined && process.env.VPS_SMB_PUBLIC_PORT !== '';
+const sftpPort = Number(process.env.VPS_SFTP_PORT || 2222);
+const sftpUsername = process.env.VPS_SFTP_USERNAME || 'tmbackup';
+const sftpPassword = process.env.VPS_SFTP_PASSWORD || '';
+const sftpRootPath = process.env.VPS_SFTP_ROOT_PATH || '/smb-share';
 const apiToken = process.env.VPS_API_TOKEN || 'change-me';
 const adminUsername = process.env.VPS_ADMIN_USERNAME || 'admin';
 const adminPassword = process.env.VPS_ADMIN_PASSWORD || 'change-admin-password';
@@ -31,6 +37,9 @@ const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
     hostname: '',
     rootShareName: 'timemachine',
     smbPublicPort,
+    smbEnabled: true,
+    sftpEnabled: true,
+    mountManagementEnabled: true,
     setupCompleted: false,
     adminUsername: '',
     adminPassword: ''
@@ -62,9 +71,484 @@ const contentTypeByExt = {
 const rawLogBufferSize = Number(process.env.VPS_LOG_BUFFER_SIZE || 2000);
 const maxLogEntries = Number.isFinite(rawLogBufferSize) && rawLogBufferSize > 0 ? Math.max(100, Math.floor(rawLogBufferSize)) : 2000;
 const logHeartbeatMs = 15000;
+const runtimeLogsDir = process.env.VPS_RUNTIME_LOG_DIR || join(dataDir, 'runtime-logs');
+const runtimeLogSources = Object.freeze([
+  {
+    id: 'admin-api',
+    source: 'service:admin-api',
+    label: 'Admin API',
+    type: 'service',
+    description: 'Node admin/public API runtime logs',
+    path: join(runtimeLogsDir, 'admin-api.log')
+  },
+  {
+    id: 'samba',
+    source: 'service:samba',
+    label: 'Samba',
+    type: 'service',
+    description: 'smbd daemon logs',
+    path: join(runtimeLogsDir, 'samba.log')
+  },
+  {
+    id: 'sftp',
+    source: 'service:sftp',
+    label: 'SFTP / SSH',
+    type: 'service',
+    description: 'sshd daemon logs',
+    path: join(runtimeLogsDir, 'sftp.log')
+  }
+]);
+const defaultTailLines = Number(process.env.VPS_TAIL_DEFAULT_LINES || 200);
+const maxTailLines = Number(process.env.VPS_TAIL_MAX_LINES || 5000);
+const terminalHeartbeatMs = 15000;
+const terminalIdleMs = Number(process.env.VPS_TERMINAL_IDLE_MS || 20 * 60 * 1000);
+const terminalOutputBufferChars = Number(process.env.VPS_TERMINAL_BUFFER_CHARS || 300000);
+const terminalSnapshotChars = Number(process.env.VPS_TERMINAL_SNAPSHOT_CHARS || 120000);
 const liveLogs = [];
 const logSubscribers = new Set();
+const terminalSessions = new Map();
 let nextLogId = 1;
+let terminalGcTimer = null;
+
+function parsePositiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const normalized = Math.floor(parsed);
+  if (normalized < min) {
+    return min;
+  }
+  if (normalized > max) {
+    return max;
+  }
+  return normalized;
+}
+
+function trimTextBuffer(text, maxChars) {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return text.slice(text.length - maxChars);
+}
+
+function commandOutput(command, args = [], options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { ...options, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+function listServiceTailSources() {
+  return runtimeLogSources.map((entry) => ({
+    id: entry.id,
+    source: entry.source,
+    label: entry.label,
+    type: entry.type,
+    description: entry.description,
+    available: existsSync(entry.path)
+  }));
+}
+
+async function listContainerTailSources() {
+  try {
+    const { stdout } = await commandOutput('docker', ['ps', '--format', '{{.Names}}\t{{.Image}}\t{{.Status}}']);
+    return String(stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [name = '', image = '', status = ''] = line.split('\t');
+        return {
+          id: name,
+          source: `docker:${name}`,
+          label: name,
+          type: 'container',
+          description: [image, status].filter(Boolean).join(' - '),
+          available: true
+        };
+      })
+      .filter((entry) => entry.id);
+  } catch {
+    return [];
+  }
+}
+
+async function listTailSources() {
+  await ensureRuntimeLogFiles();
+  const [containers, services] = await Promise.all([
+    listContainerTailSources(),
+    Promise.resolve(listServiceTailSources())
+  ]);
+  return [...containers, ...services];
+}
+
+async function ensureRuntimeLogFiles() {
+  await ensureDir(runtimeLogsDir);
+  await Promise.all(runtimeLogSources.map((entry) => writeFile(entry.path, '', { flag: 'a' }).catch(() => { })));
+}
+
+function resolveServiceLogSource(source) {
+  const normalized = String(source || '').trim();
+  if (!normalized) {
+    return null;
+  }
+  const id = normalized.startsWith('service:') ? normalized.slice('service:'.length) : normalized;
+  return runtimeLogSources.find((entry) => entry.id === id || entry.source === normalized) || null;
+}
+
+function sanitizeContainerName(name) {
+  const value = String(name || '').trim();
+  if (!value || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value)) {
+    return '';
+  }
+  return value;
+}
+
+async function resolveTailCommand(source, linesValue) {
+  const sourceValue = String(source || '').trim();
+  if (!sourceValue) {
+    throw Object.assign(new Error('Missing required query parameter: source'), { statusCode: 400 });
+  }
+
+  const lines = parsePositiveInt(linesValue, defaultTailLines, { min: 1, max: maxTailLines });
+
+  if (sourceValue.startsWith('docker:')) {
+    const container = sanitizeContainerName(sourceValue.slice('docker:'.length));
+    if (!container) {
+      throw Object.assign(new Error('Invalid docker container name'), { statusCode: 400 });
+    }
+
+    return {
+      metadata: {
+        source: `docker:${container}`,
+        label: container,
+        type: 'container'
+      },
+      command: 'docker',
+      args: ['logs', '--tail', String(lines), '-f', '--timestamps', container]
+    };
+  }
+
+  const service = resolveServiceLogSource(sourceValue);
+  if (!service) {
+    throw Object.assign(new Error(`Unknown log source: ${sourceValue}`), { statusCode: 404 });
+  }
+
+  await ensureRuntimeLogFiles();
+
+  return {
+    metadata: {
+      source: service.source,
+      label: service.label,
+      type: service.type
+    },
+    command: 'tail',
+    args: ['-n', String(lines), '-F', service.path]
+  };
+}
+
+function writeSseHeaders(res) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive'
+  });
+  res.write('\n');
+}
+
+function startCommandTailStream(res, { metadata, command, args }) {
+  writeSseHeaders(res);
+  const safeSseWrite = (event, payload) => {
+    if (res.writableEnded || res.destroyed) {
+      return;
+    }
+    try {
+      sseWrite(res, event, payload);
+    } catch {
+      // Client disconnected.
+    }
+  };
+  safeSseWrite('source', metadata);
+
+  const tailProcess = spawn(command, args, {
+    env: process.env,
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let stdoutRemainder = '';
+  let stderrRemainder = '';
+
+  const emitData = (streamName, chunk) => {
+    const next = `${streamName === 'stdout' ? stdoutRemainder : stderrRemainder}${String(chunk || '').replace(/\r\n/g, '\n')}`;
+    const lines = next.split('\n');
+    const remainder = lines.pop() || '';
+    for (const line of lines) {
+      safeSseWrite('line', { stream: streamName, line });
+    }
+    if (streamName === 'stdout') {
+      stdoutRemainder = remainder;
+    } else {
+      stderrRemainder = remainder;
+    }
+  };
+
+  const flushRemainder = () => {
+    if (stdoutRemainder) {
+      safeSseWrite('line', { stream: 'stdout', line: stdoutRemainder });
+      stdoutRemainder = '';
+    }
+    if (stderrRemainder) {
+      safeSseWrite('line', { stream: 'stderr', line: stderrRemainder });
+      stderrRemainder = '';
+    }
+  };
+
+  tailProcess.stdout.on('data', (chunk) => emitData('stdout', chunk));
+  tailProcess.stderr.on('data', (chunk) => emitData('stderr', chunk));
+
+  tailProcess.on('error', (error) => {
+    safeSseWrite('status', { state: 'error', message: error.message });
+    if (!res.writableEnded) {
+      res.end();
+    }
+  });
+
+  tailProcess.on('close', (code, signal) => {
+    flushRemainder();
+    safeSseWrite('status', { state: 'closed', code, signal });
+    if (!res.writableEnded) {
+      res.end();
+    }
+  });
+
+  const cleanup = () => {
+    if (tailProcess.exitCode === null && !tailProcess.killed) {
+      tailProcess.kill('SIGTERM');
+      const forceKillTimer = setTimeout(() => {
+        if (tailProcess.exitCode === null && !tailProcess.killed) {
+          tailProcess.kill('SIGKILL');
+        }
+      }, 1500);
+      forceKillTimer.unref?.();
+    }
+  };
+
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
+function activeTerminalSessionCount() {
+  let count = 0;
+  for (const session of terminalSessions.values()) {
+    if (!session.closed) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function terminalSummary(session) {
+  return {
+    sessionId: session.id,
+    shell: session.shell,
+    cwd: session.cwd,
+    createdAt: session.createdAt,
+    closed: session.closed,
+    exitCode: session.exitCode,
+    exitSignal: session.exitSignal
+  };
+}
+
+function broadcastTerminalEvent(session, event, payload) {
+  for (const subscriber of [...session.subscribers]) {
+    try {
+      sseWrite(subscriber.res, event, payload);
+    } catch {
+      clearInterval(subscriber.heartbeat);
+      session.subscribers.delete(subscriber);
+    }
+  }
+}
+
+function resolveTerminalShell() {
+  const configured = String(process.env.VPS_TERMINAL_SHELL || '').trim();
+  if (configured) {
+    return configured;
+  }
+  if (existsSync('/bin/bash')) {
+    return '/bin/bash';
+  }
+  return '/bin/sh';
+}
+
+function createTerminalSession() {
+  const shell = resolveTerminalShell();
+  const cwd = process.cwd();
+  const sessionId = randomUUID();
+  const terminalProcess = spawn(shell, ['-i'], {
+    cwd,
+    env: {
+      ...process.env,
+      TERM: process.env.TERM || 'xterm-256color',
+      COLORTERM: process.env.COLORTERM || 'truecolor'
+    },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+
+  const session = {
+    id: sessionId,
+    shell,
+    cwd,
+    process: terminalProcess,
+    subscribers: new Set(),
+    output: '',
+    createdAt: new Date().toISOString(),
+    lastActiveAt: Date.now(),
+    closed: false,
+    exitCode: null,
+    exitSignal: null
+  };
+
+  const pushOutput = (chunk, stream = 'stdout') => {
+    if (session.closed) {
+      return;
+    }
+    const text = String(chunk || '');
+    if (!text) {
+      return;
+    }
+    session.output = trimTextBuffer(`${session.output}${text}`, terminalOutputBufferChars);
+    session.lastActiveAt = Date.now();
+    broadcastTerminalEvent(session, 'output', { stream, chunk: text });
+  };
+
+  terminalProcess.stdout.on('data', (chunk) => pushOutput(chunk, 'stdout'));
+  terminalProcess.stderr.on('data', (chunk) => pushOutput(chunk, 'stderr'));
+  terminalProcess.on('error', (error) => {
+    session.output = trimTextBuffer(`${session.output}\n[terminal error] ${error.message}\n`, terminalOutputBufferChars);
+    session.closed = true;
+    session.lastActiveAt = Date.now();
+    broadcastTerminalEvent(session, 'status', {
+      state: 'error',
+      message: error.message
+    });
+  });
+  terminalProcess.on('close', (code, signal) => {
+    session.closed = true;
+    session.exitCode = code;
+    session.exitSignal = signal || null;
+    session.lastActiveAt = Date.now();
+    broadcastTerminalEvent(session, 'status', {
+      state: 'closed',
+      code,
+      signal: signal || null
+    });
+  });
+
+  terminalSessions.set(sessionId, session);
+  return session;
+}
+
+function closeTerminalSession(sessionId) {
+  const session = terminalSessions.get(sessionId);
+  if (!session) {
+    return false;
+  }
+
+  session.closed = true;
+  session.lastActiveAt = Date.now();
+
+  if (session.process.exitCode === null && !session.process.killed) {
+    session.process.kill('SIGHUP');
+    const forceKillTimer = setTimeout(() => {
+      if (session.process.exitCode === null && !session.process.killed) {
+        session.process.kill('SIGKILL');
+      }
+    }, 1200);
+    forceKillTimer.unref?.();
+  }
+
+  for (const subscriber of [...session.subscribers]) {
+    clearInterval(subscriber.heartbeat);
+    try {
+      subscriber.res.end();
+    } catch {
+      // ignore
+    }
+  }
+  session.subscribers.clear();
+  terminalSessions.delete(sessionId);
+  return true;
+}
+
+function startTerminalStream(res, session) {
+  writeSseHeaders(res);
+  sseWrite(res, 'snapshot', {
+    ...terminalSummary(session),
+    output: trimTextBuffer(session.output, terminalSnapshotChars)
+  });
+
+  if (session.closed) {
+    sseWrite(res, 'status', {
+      state: 'closed',
+      code: session.exitCode,
+      signal: session.exitSignal
+    });
+    res.end();
+    return;
+  }
+
+  const subscriber = {
+    res,
+    heartbeat: setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(': heartbeat\n\n');
+      }
+    }, terminalHeartbeatMs)
+  };
+
+  session.subscribers.add(subscriber);
+  session.lastActiveAt = Date.now();
+
+  const cleanup = () => {
+    clearInterval(subscriber.heartbeat);
+    session.subscribers.delete(subscriber);
+    session.lastActiveAt = Date.now();
+  };
+
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
+function startTerminalGc() {
+  if (terminalGcTimer) {
+    return;
+  }
+
+  terminalGcTimer = setInterval(() => {
+    const now = Date.now();
+    for (const session of [...terminalSessions.values()]) {
+      const idleFor = now - session.lastActiveAt;
+      if (session.closed && session.subscribers.size === 0) {
+        terminalSessions.delete(session.id);
+        continue;
+      }
+      if (!session.closed && idleFor > terminalIdleMs && session.subscribers.size === 0) {
+        closeTerminalSession(session.id);
+      }
+    }
+  }, 60000);
+
+  terminalGcTimer.unref?.();
+}
 
 function parseForwardedList(value) {
   return String(value || '')
@@ -240,7 +724,17 @@ function normalizeMetadataShape(metadata) {
     return {
       metadata: {
         version: 3,
-        settings: { hostname: '', rootShareName: 'timemachine', smbPublicPort, setupCompleted: false, adminUsername: '', adminPassword: '' },
+        settings: {
+          hostname: '',
+          rootShareName: 'timemachine',
+          smbPublicPort,
+          smbEnabled: true,
+          sftpEnabled: true,
+          mountManagementEnabled: true,
+          setupCompleted: false,
+          adminUsername: '',
+          adminPassword: ''
+        },
         cloudMounts: {},
         disks: {}
       },
@@ -249,7 +743,17 @@ function normalizeMetadataShape(metadata) {
   }
 
   if (!metadata.settings || typeof metadata.settings !== 'object') {
-    metadata.settings = { hostname: '', rootShareName: 'timemachine', setupCompleted: false, adminUsername: '', adminPassword: '' };
+    metadata.settings = {
+      hostname: '',
+      rootShareName: 'timemachine',
+      smbPublicPort,
+      smbEnabled: true,
+      sftpEnabled: true,
+      mountManagementEnabled: true,
+      setupCompleted: false,
+      adminUsername: '',
+      adminPassword: ''
+    };
     changed = true;
   } else {
     if (metadata.settings.hostname === undefined) {
@@ -262,6 +766,18 @@ function normalizeMetadataShape(metadata) {
     }
     if (!Number.isFinite(Number(metadata.settings.smbPublicPort))) {
       metadata.settings.smbPublicPort = smbPublicPort;
+      changed = true;
+    }
+    if (metadata.settings.smbEnabled === undefined) {
+      metadata.settings.smbEnabled = true;
+      changed = true;
+    }
+    if (metadata.settings.sftpEnabled === undefined) {
+      metadata.settings.sftpEnabled = true;
+      changed = true;
+    }
+    if (metadata.settings.mountManagementEnabled === undefined) {
+      metadata.settings.mountManagementEnabled = true;
       changed = true;
     }
     if (metadata.settings.setupCompleted === undefined) {
@@ -644,6 +1160,53 @@ function effectiveSmbPublicPort(settings) {
   return 445;
 }
 
+function isSmbFeatureEnabled(settings) {
+  return settings?.smbEnabled !== false;
+}
+
+function isSftpFeatureEnabled(settings) {
+  return settings?.sftpEnabled !== false;
+}
+
+function isMountManagementEnabled(settings) {
+  return settings?.mountManagementEnabled !== false;
+}
+
+function canApplySamba(settings) {
+  return sambaManager.enabled && isSmbFeatureEnabled(settings);
+}
+
+function canManageMounts(settings) {
+  return mountManager.enabled && isMountManagementEnabled(settings);
+}
+
+function assertMountManagementEnabled(settings) {
+  if (canManageMounts(settings)) {
+    return;
+  }
+
+  const reason = !mountManager.enabled
+    ? 'Cloud mount management is disabled by VPS_MOUNT_MANAGE_ENABLED'
+    : 'Cloud mount management is disabled in settings';
+  throw Object.assign(new Error(reason), { statusCode: 400 });
+}
+
+function sftpConnectionInfo(host, settings) {
+  const server = host || '<server>';
+  const needsIpv6Brackets = server.includes(':') && !server.startsWith('[');
+  const normalizedServer = needsIpv6Brackets ? `[${server}]` : server;
+  const serverWithPort = sftpPort === 22 ? normalizedServer : `${normalizedServer}:${sftpPort}`;
+  return {
+    enabled: isSftpFeatureEnabled(settings),
+    host: server,
+    port: sftpPort,
+    username: sftpUsername,
+    password: sftpPassword,
+    rootPath: sftpRootPath,
+    url: `sftp://${serverWithPort}${sftpRootPath}`
+  };
+}
+
 function buildSmbUrls(host, settings, disk) {
   const server = host || '<server>';
   const port = effectiveSmbPublicPort(settings);
@@ -747,7 +1310,7 @@ async function applyAllDiskSharesOnStartup(metadata) {
     }
 
     try {
-      await ensureDiskStoragePathReady(disk);
+      await ensureDiskStoragePathReady(disk, metadata.settings);
       const result = await sambaManager.applyDisk(disk);
       applyResults[diskId] = {
         applied: result.applied === true,
@@ -780,8 +1343,8 @@ async function getDiskFilesPath(disk) {
   return disk.storagePath;
 }
 
-async function ensureDiskStorageReady(disk) {
-  if (disk.storageMode === 'cloud-mount' && disk.storageMountId) {
+async function ensureDiskStorageReady(disk, settings = null) {
+  if (disk.storageMode === 'cloud-mount' && disk.storageMountId && canManageMounts(settings)) {
     await mountManager.ensureMount(disk.storageMountId);
   }
 }
@@ -790,9 +1353,9 @@ function isIoError(error) {
   return error?.code === 'EIO' || /\bi\/o error\b/i.test(String(error?.message || ''));
 }
 
-async function ensureDiskStoragePathReady(disk) {
+async function ensureDiskStoragePathReady(disk, settings = null) {
   const cloudMountId = disk.storageMode === 'cloud-mount' ? disk.storageMountId : null;
-  if (cloudMountId) {
+  if (cloudMountId && canManageMounts(settings)) {
     await mountManager.ensureMount(cloudMountId);
   }
 
@@ -800,7 +1363,7 @@ async function ensureDiskStoragePathReady(disk) {
     await ensureDir(disk.storagePath);
     return;
   } catch (error) {
-    if (!cloudMountId || !isIoError(error)) {
+    if (!cloudMountId || !isIoError(error) || !canManageMounts(settings)) {
       throw error;
     }
 
@@ -1014,6 +1577,84 @@ async function handleAdminApi(req, res, url) {
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/admin/api/log-tail/sources') {
+    const sources = await listTailSources();
+    sendJson(res, 200, { sources });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/api/log-tail/stream') {
+    const streamConfig = await resolveTailCommand(url.searchParams.get('source'), url.searchParams.get('lines'));
+    startCommandTailStream(res, streamConfig);
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/api/terminal/sessions') {
+    const session = createTerminalSession();
+    appendLog({
+      source: 'admin',
+      level: 'info',
+      host: requestClientHost(req),
+      message: `Created terminal session ${session.id}`,
+      path: url.pathname,
+      method: req.method
+    });
+    sendJson(res, 201, {
+      ...terminalSummary(session),
+      activeSessions: activeTerminalSessionCount()
+    });
+    return;
+  }
+
+  const terminalSegments = url.pathname.split('/').filter(Boolean);
+  if (
+    terminalSegments[0] === 'admin' &&
+    terminalSegments[1] === 'api' &&
+    terminalSegments[2] === 'terminal' &&
+    terminalSegments[3] === 'sessions' &&
+    terminalSegments[4]
+  ) {
+    const sessionId = terminalSegments[4];
+    const session = terminalSessions.get(sessionId);
+    if (!session) {
+      throw Object.assign(new Error(`Unknown terminal session id: ${sessionId}`), { statusCode: 404 });
+    }
+
+    if (req.method === 'GET' && terminalSegments.length === 5) {
+      sendJson(res, 200, terminalSummary(session));
+      return;
+    }
+
+    if (req.method === 'DELETE' && terminalSegments.length === 5) {
+      closeTerminalSession(sessionId);
+      sendNoContent(res);
+      return;
+    }
+
+    if (req.method === 'GET' && terminalSegments.length === 6 && terminalSegments[5] === 'stream') {
+      startTerminalStream(res, session);
+      return;
+    }
+
+    if (req.method === 'POST' && terminalSegments.length === 6 && terminalSegments[5] === 'input') {
+      if (session.closed || session.process.stdin.destroyed) {
+        throw Object.assign(new Error('Terminal session is closed'), { statusCode: 409 });
+      }
+
+      const payload = await readJsonBody(req);
+      const input = String(payload.input ?? '');
+      if (!input) {
+        sendJson(res, 200, { ok: true, received: 0 });
+        return;
+      }
+
+      const written = session.process.stdin.write(input);
+      session.lastActiveAt = Date.now();
+      sendJson(res, 200, { ok: true, received: input.length, buffered: !written });
+      return;
+    }
+  }
+
   if (req.method === 'GET' && url.pathname === '/admin/api/samba/status') {
     sendJson(res, 200, sambaManager.status());
     return;
@@ -1024,20 +1665,36 @@ async function handleAdminApi(req, res, url) {
     const host = requestHost(req, metadata);
     const mountStatusById = new Map(mountManager.status().mounts.map((mount) => [mount.id, mount]));
     const { settings } = metadata;
+    const sambaStatus = sambaManager.status();
+    const mountsStatus = mountManager.status();
+    const smbEnabled = isSmbFeatureEnabled(settings);
+    const mountManagementEnabled = isMountManagementEnabled(settings);
 
     sendJson(res, 200, {
       settings: {
         hostname: settings.hostname,
         rootShareName: settings.rootShareName,
         smbPublicPort: effectiveSmbPublicPort(settings),
+        smbEnabled,
+        sftpEnabled: isSftpFeatureEnabled(settings),
+        mountManagementEnabled,
         setupCompleted: settings.setupCompleted === true
       },
-      samba: sambaManager.status(),
+      samba: {
+        ...sambaStatus,
+        settingEnabled: smbEnabled,
+        effectiveEnabled: sambaStatus.enabled && smbEnabled
+      },
+      sftp: sftpConnectionInfo(host, settings),
       mounts: Object.values(metadata.cloudMounts).map((mount) => ({
         ...mount,
         runtime: mountStatusById.get(mount.id) || null
       })),
-      mountManager: mountManager.status(),
+      mountManager: {
+        ...mountsStatus,
+        settingEnabled: mountManagementEnabled,
+        effectiveEnabled: mountsStatus.enabled && mountManagementEnabled
+      },
       disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
     });
     return;
@@ -1066,13 +1723,22 @@ async function handleAdminApi(req, res, url) {
       if (payload.smbPublicPort !== undefined) {
         draft.settings.smbPublicPort = Number(payload.smbPublicPort || 445);
       }
+      if (payload.smbEnabled !== undefined) {
+        draft.settings.smbEnabled = Boolean(payload.smbEnabled);
+      }
+      if (payload.sftpEnabled !== undefined) {
+        draft.settings.sftpEnabled = Boolean(payload.sftpEnabled);
+      }
+      if (payload.mountManagementEnabled !== undefined) {
+        draft.settings.mountManagementEnabled = Boolean(payload.mountManagementEnabled);
+      }
       if (payload.markSetupComplete !== false) {
         draft.settings.setupCompleted = true;
       }
       return draft;
     });
 
-    if (payload.applySamba !== false) {
+    if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
       await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
     }
 
@@ -1082,6 +1748,9 @@ async function handleAdminApi(req, res, url) {
         hostname: metadata.settings.hostname,
         rootShareName: metadata.settings.rootShareName,
         smbPublicPort: effectiveSmbPublicPort(metadata.settings),
+        smbEnabled: isSmbFeatureEnabled(metadata.settings),
+        sftpEnabled: isSftpFeatureEnabled(metadata.settings),
+        mountManagementEnabled: isMountManagementEnabled(metadata.settings),
         setupCompleted: true
       }
     });
@@ -1098,10 +1767,19 @@ async function handleAdminApi(req, res, url) {
       if (payload.smbPublicPort !== undefined) {
         draft.settings.smbPublicPort = Number(payload.smbPublicPort || 445);
       }
+      if (payload.smbEnabled !== undefined) {
+        draft.settings.smbEnabled = Boolean(payload.smbEnabled);
+      }
+      if (payload.sftpEnabled !== undefined) {
+        draft.settings.sftpEnabled = Boolean(payload.sftpEnabled);
+      }
+      if (payload.mountManagementEnabled !== undefined) {
+        draft.settings.mountManagementEnabled = Boolean(payload.mountManagementEnabled);
+      }
       return draft;
     });
 
-    if (payload.applySamba !== false) {
+    if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
       await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
     }
 
@@ -1116,7 +1794,14 @@ async function handleAdminApi(req, res, url) {
       ...mount,
       runtime: runtimeById.get(mount.id) || null
     }));
-    sendJson(res, 200, { mounts, manager: mountManager.status() });
+    sendJson(res, 200, {
+      mounts,
+      manager: {
+        ...mountManager.status(),
+        settingEnabled: isMountManagementEnabled(metadata.settings),
+        effectiveEnabled: canManageMounts(metadata.settings)
+      }
+    });
     return;
   }
 
@@ -1161,13 +1846,15 @@ async function handleAdminApi(req, res, url) {
     });
 
     let ensure = null;
-    if (payload.ensureMounted !== false) {
+    if (payload.ensureMounted !== false && canManageMounts(metadata.settings)) {
       try {
         const result = await mountManager.ensureMount(mountId);
         ensure = { ok: true, result };
       } catch (error) {
         ensure = { ok: false, error: error.message };
       }
+    } else if (payload.ensureMounted !== false) {
+      ensure = { ok: false, skipped: true, reason: 'Cloud mount management is disabled' };
     }
 
     sendJson(res, 201, { mount: metadata.cloudMounts[mountId], runtime: mountManager.status(), ensure });
@@ -1245,6 +1932,7 @@ async function handleAdminApi(req, res, url) {
       });
 
       if (payload.ensureMounted === true) {
+        assertMountManagementEnabled(metadata.settings);
         await mountManager.ensureMount(mountId);
       }
 
@@ -1253,12 +1941,16 @@ async function handleAdminApi(req, res, url) {
     }
 
     if (req.method === 'POST' && mountSegments.length === 5 && mountSegments[4] === 'ensure') {
+      const metadata = await loadMetadata();
+      assertMountManagementEnabled(metadata.settings);
       const result = await mountManager.ensureMount(mountId);
       sendJson(res, 200, { result, runtime: mountManager.status() });
       return;
     }
 
     if (req.method === 'POST' && mountSegments.length === 5 && mountSegments[4] === 'unmount') {
+      const metadata = await loadMetadata();
+      assertMountManagementEnabled(metadata.settings);
       const result = await mountManager.unmount(mountId);
       sendJson(res, 200, { result, runtime: mountManager.status() });
       return;
@@ -1292,7 +1984,7 @@ async function handleAdminApi(req, res, url) {
     const now = new Date().toISOString();
     const diskId = payload.id || randomUUID();
     const storage = resolveStoragePath(payload, diskId, metadataBefore);
-    if (storage.storageMode === 'cloud-mount' && storage.storageMountId) {
+    if (storage.storageMode === 'cloud-mount' && storage.storageMountId && canManageMounts(metadataBefore.settings)) {
       await mountManager.ensureMount(storage.storageMountId);
     }
 
@@ -1329,7 +2021,7 @@ async function handleAdminApi(req, res, url) {
 
     const disk = metadata.disks[diskId];
     try {
-      await ensureDiskStoragePathReady(disk);
+      await ensureDiskStoragePathReady(disk, metadata.settings);
     } catch (error) {
       await updateMetadata((draft) => {
         delete draft.disks[diskId];
@@ -1338,7 +2030,7 @@ async function handleAdminApi(req, res, url) {
       throw error;
     }
 
-    if (payload.applySamba !== false) {
+    if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
       const applyResult = await ensureDiskShareApplied(disk, metadata.settings);
       await updateMetadata((draft) => {
         const current = draft.disks[diskId];
@@ -1416,11 +2108,11 @@ async function handleAdminApi(req, res, url) {
       });
 
       const disk = metadata.disks[diskId];
-      if (disk.storageMode === 'cloud-mount' && disk.storageMountId) {
+      if (disk.storageMode === 'cloud-mount' && disk.storageMountId && canManageMounts(metadata.settings)) {
         await mountManager.ensureMount(disk.storageMountId);
       }
-      await ensureDiskStoragePathReady(disk);
-      if (payload.applySamba !== false) {
+      await ensureDiskStoragePathReady(disk, metadata.settings);
+      if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
         await ensureDiskShareApplied(disk, metadata.settings);
       }
 
@@ -1444,13 +2136,18 @@ async function handleAdminApi(req, res, url) {
       });
 
       const disk = metadata.disks[diskId];
-      const result = await ensureDiskShareApplied(disk, metadata.settings);
+      const result = canApplySamba(metadata.settings)
+        ? await ensureDiskShareApplied(disk, metadata.settings)
+        : {
+          disk: { applied: false, reason: 'SMB management is disabled in settings' },
+          root: { applied: false, reason: 'SMB management is disabled in settings' }
+        };
       await updateMetadata((draft) => {
         const current = draft.disks[diskId];
         if (!current) {
           return draft;
         }
-        current.smbLastAppliedAt = new Date().toISOString();
+        current.smbLastAppliedAt = canApplySamba(metadata.settings) ? new Date().toISOString() : current.smbLastAppliedAt;
         current.smbLastAppliedError = result.disk.applied ? null : result.disk.reason || 'Not applied';
         return draft;
       });
@@ -1474,7 +2171,10 @@ async function handleAdminApi(req, res, url) {
     }
 
     if (req.method === 'POST' && segments.length === 5 && segments[4] === 'apply-samba') {
-      const { metadata, disk } = await assertDiskExists(diskId);
+      const { disk } = await assertDiskExists(diskId);
+      if (!canApplySamba(metadata.settings)) {
+        throw Object.assign(new Error('SMB management is disabled in settings'), { statusCode: 400 });
+      }
       const result = await ensureDiskShareApplied(disk, metadata.settings);
       await updateMetadata((draft) => {
         const current = draft.disks[diskId];
@@ -1515,12 +2215,14 @@ async function handleAdminApi(req, res, url) {
         await deleteDiskFilesDir(disk);
       }
 
-      await sambaManager.removeDisk(disk).catch((error) => {
-        console.error('Failed to remove samba share:', error.message);
-      });
-      await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
-        console.error('Failed to apply root share:', error.message);
-      });
+      if (canApplySamba(metadata.settings)) {
+        await sambaManager.removeDisk(disk).catch((error) => {
+          console.error('Failed to remove samba share:', error.message);
+        });
+        await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
+          console.error('Failed to apply root share:', error.message);
+        });
+      }
 
       appendLog({
         source: 'admin',
@@ -1558,6 +2260,7 @@ async function handleApi(req, res, url) {
     const hostWithPort = port === 445 ? (host || '<server>') : `${host || '<server>'}:${port}`;
     sendJson(res, 200, {
       smbShareRoot,
+      smbEnabled: isSmbFeatureEnabled(metadata.settings),
       rootShareName: metadata.settings.rootShareName,
       rootShareUrl: `smb://${hostWithPort}/${metadata.settings.rootShareName}`,
       disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
@@ -1575,7 +2278,7 @@ async function handleApi(req, res, url) {
     const now = new Date().toISOString();
     const diskId = payload.id || randomUUID();
     const storage = resolveStoragePath(payload, diskId, metadataBefore);
-    if (storage.storageMode === 'cloud-mount' && storage.storageMountId) {
+    if (storage.storageMode === 'cloud-mount' && storage.storageMountId && canManageMounts(metadataBefore.settings)) {
       await mountManager.ensureMount(storage.storageMountId);
     }
 
@@ -1605,7 +2308,7 @@ async function handleApi(req, res, url) {
 
     const disk = metadata.disks[diskId];
     try {
-      await ensureDiskStoragePathReady(disk);
+      await ensureDiskStoragePathReady(disk, metadata.settings);
     } catch (error) {
       await updateMetadata((draft) => {
         delete draft.disks[diskId];
@@ -1614,7 +2317,7 @@ async function handleApi(req, res, url) {
       throw error;
     }
 
-    if (payload.applySamba === true) {
+    if (payload.applySamba === true && canApplySamba(metadata.settings)) {
       await ensureDiskShareApplied(disk, metadata.settings);
     }
 
@@ -1640,7 +2343,7 @@ async function handleApi(req, res, url) {
       const payload = await readJsonBody(req).catch(() => ({}));
       const deleteData = payload.deleteData !== false;
 
-      const { disk } = await assertDiskExists(diskId);
+      const { metadata, disk } = await assertDiskExists(diskId);
       await updateMetadata((draft) => {
         delete draft.disks[diskId];
         return draft;
@@ -1662,8 +2365,8 @@ async function handleApi(req, res, url) {
     }
 
     if (req.method === 'GET' && segments.length === 4 && segments[3] === 'files') {
-      const { disk } = await assertDiskExists(diskId);
-      await ensureDiskStorageReady(disk);
+      const { metadata, disk } = await assertDiskExists(diskId);
+      await ensureDiskStorageReady(disk, metadata.settings);
       const prefix = (url.searchParams.get('prefix') || '').replace(/^\/+/, '');
       const files = await listDiskFiles(disk, prefix);
       sendJson(res, 200, { files });
@@ -1671,8 +2374,8 @@ async function handleApi(req, res, url) {
     }
 
     if (segments.length === 4 && segments[3] === 'file') {
-      const { disk } = await assertDiskExists(diskId);
-      await ensureDiskStorageReady(disk);
+      const { metadata, disk } = await assertDiskExists(diskId);
+      await ensureDiskStorageReady(disk, metadata.settings);
       const relPath = normalizePathFromQuery(url);
       const diskFilesDir = await getDiskFilesPath(disk);
       const filePath = safeJoin(diskFilesDir, relPath);
@@ -1779,6 +2482,8 @@ async function main() {
   await ensureDir(dataDir);
   await ensureDir(smbShareRoot);
   await ensureDir(adminWebRoot);
+  await ensureRuntimeLogFiles();
+  startTerminalGc();
   const metadata = await loadMetadata();
 
   if (apiToken === 'change-me') {
@@ -1792,7 +2497,7 @@ async function main() {
   mountManager.setDefinitions(metadata.cloudMounts);
   await mountManager.start();
 
-  if (sambaManager.enabled) {
+  if (canApplySamba(metadata.settings)) {
     await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
       console.error('Failed to apply root samba share:', error.message);
     });
@@ -1875,6 +2580,13 @@ async function main() {
       return;
     }
     shuttingDown = true;
+    if (terminalGcTimer) {
+      clearInterval(terminalGcTimer);
+      terminalGcTimer = null;
+    }
+    for (const sessionId of [...terminalSessions.keys()]) {
+      closeTerminalSession(sessionId);
+    }
     for (const subscriber of [...logSubscribers]) {
       clearInterval(subscriber.heartbeat);
       subscriber.res.end();

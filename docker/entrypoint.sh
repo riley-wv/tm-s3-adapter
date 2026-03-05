@@ -8,9 +8,11 @@ export VPS_SFTP_USERNAME="${VPS_SFTP_USERNAME:-tmbackup}"
 export VPS_SFTP_PASSWORD="${VPS_SFTP_PASSWORD:-change-sftp-password}"
 export VPS_SFTP_UID="${VPS_SFTP_UID:-10000}"
 export VPS_SFTP_GID="${VPS_SFTP_GID:-10000}"
+export VPS_RUNTIME_LOG_DIR="${VPS_RUNTIME_LOG_DIR:-${VPS_DATA_DIR}/runtime-logs}"
 
-mkdir -p "${VPS_DATA_DIR}" "${VPS_SMB_SHARE_ROOT}" /etc/samba/smb.conf.d/tm-adapter /var/run/sshd /run/samba /mnt/tm-cloud /root/.config/rclone
+mkdir -p "${VPS_DATA_DIR}" "${VPS_SMB_SHARE_ROOT}" "${VPS_RUNTIME_LOG_DIR}" /etc/samba/smb.conf.d/tm-adapter /var/run/sshd /run/samba /mnt/tm-cloud /root/.config/rclone
 chmod 755 "${VPS_DATA_DIR}"
+touch "${VPS_RUNTIME_LOG_DIR}/admin-api.log" "${VPS_RUNTIME_LOG_DIR}/samba.log" "${VPS_RUNTIME_LOG_DIR}/sftp.log"
 
 if getent group "${VPS_SFTP_GID}" >/dev/null 2>&1; then
   sftp_group="$(getent group "${VPS_SFTP_GID}" | cut -d: -f1)"
@@ -51,13 +53,18 @@ ssh-keygen -A >/dev/null 2>&1
 pids=()
 
 start_process() {
-  "$@" &
+  local process_name="$1"
+  shift
+  local log_file="${VPS_RUNTIME_LOG_DIR}/${process_name}.log"
+  (
+    "$@" 2>&1 | tee -a "${log_file}"
+  ) &
   pids+=("$!")
 }
 
-start_process smbd --foreground --no-process-group
-start_process /usr/sbin/sshd -D -e
-start_process node src/vpsd/index.mjs
+start_process samba smbd --foreground --no-process-group
+start_process sftp /usr/sbin/sshd -D -e
+start_process admin-api node src/vpsd/index.mjs
 
 shutdown() {
   for pid in "${pids[@]}"; do

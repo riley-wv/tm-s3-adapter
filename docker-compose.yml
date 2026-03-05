@@ -12,17 +12,17 @@ services:
     security_opt:
       - apparmor:unconfined
     ports:
-      - "${VPS_ADMIN_DASHBOARD_PORT:-8787}:8787"
-      - "${VPS_ADMIN_API_PORT:-8788}:8788"
-      - "${VPS_SMB_PORT:-1445}:445"
-      - "${VPS_SFTP_PORT:-2222}:2222"
+      - "127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}:8787"
+      - "127.0.0.1:${VPS_ADMIN_API_PORT:-8788}:8788"
+      - "127.0.0.1:${VPS_SMB_PORT:-1445}:445"
+      - "127.0.0.1:${VPS_SFTP_PORT:-2222}:2222"
     environment:
       VPS_ADMIN_DASHBOARD_PORT: "8787"
       VPS_ADMIN_API_PORT: "8788"
       VPS_DATA_DIR: /data/vps
       VPS_SMB_SHARE_ROOT: /data/vps/smb-share
       VPS_ADMIN_WEB_ROOT: /app/web/vps-public
-      VPS_API_TOKEN: "${VPS_API_TOKEN:-admin123}"
+      VPS_API_TOKEN: "${VPS_API_TOKEN:-bf54b6e7fbe77837b37fbb91b6c4c2be42e9cc781750b258a877baa8d4a90942}"
       VPS_ADMIN_USERNAME: "${VPS_ADMIN_USERNAME:-admin}"
       VPS_ADMIN_PASSWORD: "${VPS_ADMIN_PASSWORD:-9gwO~A9:Sb693js.Evb$}"
       VPS_ADMIN_SESSION_SECONDS: "${VPS_ADMIN_SESSION_SECONDS:-43200}"
