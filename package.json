@@ -1,0 +1,25 @@
+{
+  "name": "tm-s3-adapter",
+  "version": "0.1.0",
+  "description": "VPS adapter that makes cloud drives usable as Time Machine backup destinations.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "vpsd": "node src/vpsd/index.mjs",
+    "dashboard:dev": "cd web/dashboard && NEXT_TELEMETRY_DISABLED=1 next dev",
+    "dashboard:build": "cd web/dashboard && NEXT_TELEMETRY_DISABLED=1 next build && rm -rf ../vps-public && mkdir -p ../vps-public && cp -R out/. ../vps-public/",
+    "admin:build": "npm run dashboard:build",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1002.0",
+    "next": "^16.1.6",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  }
+}

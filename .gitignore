@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+.env
+*.log
+data/
+coverage/
+.next/
+web/dashboard/.next/
+web/dashboard/out/

@@ -1,0 +1,47 @@
+services:
+  tm-adapter-vps:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tm-adapter-vps
+    restart: unless-stopped
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    ports:
+      - "${VPS_ADMIN_DASHBOARD_PORT:-8787}:8787"
+      - "${VPS_ADMIN_API_PORT:-8788}:8788"
+      - "${VPS_SMB_PORT:-1445}:445"
+      - "${VPS_SFTP_PORT:-2222}:2222"
+    environment:
+      VPS_ADMIN_DASHBOARD_PORT: "8787"
+      VPS_ADMIN_API_PORT: "8788"
+      VPS_DATA_DIR: /data/vps
+      VPS_SMB_SHARE_ROOT: /data/vps/smb-share
+      VPS_ADMIN_WEB_ROOT: /app/web/vps-public
+      VPS_API_TOKEN: "${VPS_API_TOKEN:-admin123}"
+      VPS_ADMIN_USERNAME: "${VPS_ADMIN_USERNAME:-admin}"
+      VPS_ADMIN_PASSWORD: "${VPS_ADMIN_PASSWORD:-9gwO~A9:Sb693js.Evb$}"
+      VPS_ADMIN_SESSION_SECONDS: "${VPS_ADMIN_SESSION_SECONDS:-43200}"
+      VPS_SAMBA_MANAGE_ENABLED: "${VPS_SAMBA_MANAGE_ENABLED:-true}"
+      VPS_SMB_PUBLIC_PORT: "${VPS_SMB_PUBLIC_PORT:-${VPS_SMB_PORT:-1445}}"
+      VPS_SAMBA_CONF_DIR: /etc/samba/smb.conf.d/tm-adapter
+      VPS_SAMBA_MAIN_CONF: /etc/samba/smb.conf
+      VPS_SAMBA_GENERATED_CONF: /etc/samba/smb.conf.d/tm-adapter/_generated.conf
+      VPS_SAMBA_INCLUDE_LINE: "include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf"
+      VPS_SAMBA_RESTART_CMD: "smbcontrol all reload-config || pkill -HUP smbd || true"
+      VPS_MOUNT_MANAGE_ENABLED: "${VPS_MOUNT_MANAGE_ENABLED:-true}"
+      VPS_MOUNT_POLL_SECONDS: "${VPS_MOUNT_POLL_SECONDS:-30}"
+      VPSD_RCLONE_BINARY: rclone
+      VPS_SFTP_PORT: "2222"
+      VPS_SFTP_USERNAME: "${VPS_SFTP_USERNAME:-tmbackup}"
+      VPS_SFTP_PASSWORD: "${VPS_SFTP_PASSWORD:-tmbackup123}"
+      VPS_SFTP_UID: "${VPS_SFTP_UID:-10000}"
+      VPS_SFTP_GID: "${VPS_SFTP_GID:-10000}"
+    volumes:
+      - ./data/vps:/data/vps
+      - ./data/mnt:/mnt/tm-cloud
+      - ./data/rclone:/root/.config/rclone

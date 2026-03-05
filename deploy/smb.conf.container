@@ -1,0 +1,21 @@
+[global]
+   workgroup = WORKGROUP
+   server role = standalone server
+   security = user
+   map to guest = Never
+   passdb backend = tdbsam
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+   smb ports = 445
+   server min protocol = SMB2
+   ea support = yes
+   vfs objects = catia fruit streams_xattr
+   fruit:metadata = stream
+   fruit:model = TimeCapsule8,119
+   fruit:posix_rename = yes
+   fruit:veto_appledouble = no
+   fruit:wipe_intentionally_left_blank_rfork = yes
+   fruit:delete_empty_adfiles = yes
+   include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf
