@@ -4,11 +4,66 @@ This setup is optional. `tm-s3-adapter` works fine without Cloudflare Tunnel.
 
 Use this if you want to keep host ports bound to `127.0.0.1` and expose access through Cloudflare Zero Trust.
 
+Every command block below is labeled with where to run it:
+- **Server (VPS)** = your DigitalOcean/Linux host
+- **Client (Laptop)** = your Mac/desktop used to access the services
+
 ## Important notes
 
 - Dashboard/API are HTTP services and map cleanly through Tunnel ingress.
 - SMB and SFTP are TCP services. Clients must run `cloudflared access tcp` locally to forward TCP traffic.
 - Time Machine over Cloudflare is possible only if the Mac keeps the local TCP forward running while backups execute.
+- Tunnel ownership and device WARP org do not have to match. Access is evaluated by the org that owns the tunnel hostname.
+
+## Cross-org Zero Trust pattern (one org hosts, another org device)
+
+Example:
+
+- Tunnel/server org: `Webb Ventures` (owns DNS, tunnel, Access apps)
+- Device org: `Greenroom` (laptop remains connected to Greenroom WARP)
+
+This is the recommended model when you do not want to move your laptop between WARP orgs.
+
+### Architecture
+
+```text
+Laptop (WARP in Org B) -> HTTPS/TCP to Cloudflare Edge
+  -> Access policy in Org A (tunnel owner)
+  -> Cloudflare Tunnel in Org A
+  -> VPS localhost services
+```
+
+### Rules that make cross-org work
+
+- Create and run the tunnel in the server org (`Webb Ventures` in this example).
+- Create Access applications in that same server org.
+- Authenticate users against identities allowed by server-org Access policies.
+- Do not rely on WARP private-network routes for this server.
+- Avoid posture rules that require being enrolled in the server org's WARP, unless every client device is enrolled there.
+
+### Server-side checklist (Org A / tunnel owner)
+
+1. Run `cloudflared tunnel login` and choose the server org account.
+2. Create tunnel and DNS routes in that org.
+3. Configure ingress for admin/api/smb/sftp/ssh hostnames.
+4. Create Access Self-hosted apps for those hostnames.
+5. Add Allow policies for approved users/groups and require MFA.
+
+### Client-side checklist (Org B device)
+
+1. Keep WARP connected to your normal org (no org switch needed).
+2. Use hostname-based access:
+   - Browser for HTTP apps (`https://admin...`, `https://api...`)
+   - `cloudflared access ssh --hostname ...` for SSH
+   - `cloudflared access tcp --hostname ... --url 127.0.0.1:<port>` for SMB/SFTP
+3. Complete Access login when prompted for the tunnel owner's org.
+
+### Common failure modes in cross-org deployments
+
+- Access app has a device posture requirement tied to the wrong org.
+- User identity is valid in IdP, but not included in the server-org Access allow policy.
+- Attempting to use private-network routing (`warp-routing`) instead of hostname + Access for this setup.
+- SMB forward is not running continuously during Time Machine backups.
 
 ## 1. Choose hostnames
 
@@ -26,11 +81,15 @@ Follow Cloudflare package instructions for your distro.
 
 Validate installation:
 
+Run on: **Server (VPS)**
+
 ```bash
 cloudflared --version
 ```
 
 ## 3. Authenticate and create tunnel
+
+Run on: **Server (VPS)**
 
 ```bash
 cloudflared tunnel login
@@ -40,6 +99,8 @@ cloudflared tunnel create tm-adapter
 This creates tunnel credentials JSON under `~/.cloudflared/`.
 
 ## 4. Create DNS routes
+
+Run on: **Server (VPS)**
 
 ```bash
 cloudflared tunnel route dns tm-adapter admin.example.com
@@ -51,6 +112,8 @@ cloudflared tunnel route dns tm-adapter sftp.example.com
 ## 5. Configure tunnel ingress
 
 Copy sample config and edit values:
+
+Run on: **Server (VPS)**
 
 ```bash
 mkdir -p ~/.cloudflared
@@ -73,6 +136,8 @@ Example mapping (matching defaults):
 
 ## 6. Run cloudflared as a service
 
+Run on: **Server (VPS)**
+
 ```bash
 cloudflared service install
 sudo systemctl enable --now cloudflared
@@ -82,6 +147,8 @@ sudo systemctl status cloudflared
 ## 7. Configure tm-s3-adapter for tunnel-aware URLs
 
 Set in `.env`:
+
+Run on: **Server (VPS)**
 
 ```dotenv
 VPS_ADMIN_DASHBOARD_PORT=8787
@@ -100,6 +167,8 @@ In dashboard Settings, set:
 
 Restart adapter after env changes:
 
+Run on: **Server (VPS)**
+
 ```bash
 npm run docker:up
 ```
@@ -117,6 +186,8 @@ Protect these routes with Cloudflare Access policies.
 
 Start local TCP forward on the Mac:
 
+Run on: **Client (Laptop)**
+
 ```bash
 cloudflared access tcp --hostname smb.example.com --url 127.0.0.1:4455
 ```
@@ -131,6 +202,8 @@ Keep this `cloudflared` process running while Time Machine is using the share.
 
 Start local forward:
 
+Run on: **Client (Laptop)**
+
 ```bash
 cloudflared access tcp --hostname sftp.example.com --url 127.0.0.1:2222
 ```
@@ -144,6 +217,8 @@ Then connect SFTP client to:
 ## 9. Optional SSH over tunnel
 
 If ingress includes SSH, use:
+
+Run on: **Client (Laptop)**
 
 ```bash
 cloudflared access ssh --hostname ssh.example.com
@@ -163,6 +238,8 @@ or standard SSH config using ProxyCommand with cloudflared.
   - Confirm docker ports are bound and listening on VPS loopback.
 
 Check quickly on VPS:
+
+Run on: **Server (VPS)**
 
 ```bash
 ss -lntp | rg '8787|8788|1445|2222'

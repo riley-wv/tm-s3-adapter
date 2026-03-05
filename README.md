@@ -19,7 +19,7 @@ Supported storage backends:
 - [Full setup guide](./docs/SETUP.md)
 - [Configuration and environment reference](./docs/CONFIGURATION.md)
 - [Admin/Public API reference](./docs/API.md)
-- [Optional Cloudflare Tunnel setup](./docs/CLOUDFLARE_TUNNEL.md)
+- [Optional Cloudflare Tunnel setup (commands labeled Server vs Client)](./docs/CLOUDFLARE_TUNNEL.md)
 
 ## Quick start
 
