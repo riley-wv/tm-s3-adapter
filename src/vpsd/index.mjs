@@ -59,6 +59,157 @@ const contentTypeByExt = {
   '.txt': 'text/plain; charset=utf-8'
 };
 
+const rawLogBufferSize = Number(process.env.VPS_LOG_BUFFER_SIZE || 2000);
+const maxLogEntries = Number.isFinite(rawLogBufferSize) && rawLogBufferSize > 0 ? Math.max(100, Math.floor(rawLogBufferSize)) : 2000;
+const logHeartbeatMs = 15000;
+const liveLogs = [];
+const logSubscribers = new Set();
+let nextLogId = 1;
+
+function parseForwardedList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeClientHost(value) {
+  const input = String(value || '').trim();
+  if (!input) {
+    return '';
+  }
+  if (input.startsWith('::ffff:')) {
+    return input.slice('::ffff:'.length);
+  }
+  return input;
+}
+
+function requestClientHost(req) {
+  const forwardedFor = parseForwardedList(req.headers['x-forwarded-for'] || '');
+  if (forwardedFor.length > 0) {
+    return normalizeClientHost(forwardedFor[0]);
+  }
+
+  const realIp = normalizeClientHost(req.headers['x-real-ip']);
+  if (realIp) {
+    return realIp;
+  }
+
+  return normalizeClientHost(req.socket?.remoteAddress || '');
+}
+
+function inferDriveId(pathname, searchParams = null) {
+  const segments = String(pathname || '').split('/').filter(Boolean);
+  const diskIndex = segments.findIndex((segment) => segment === 'disks');
+  if (diskIndex >= 0 && segments[diskIndex + 1]) {
+    return segments[diskIndex + 1];
+  }
+
+  const fromQuery = searchParams?.get('drive') || searchParams?.get('diskId') || '';
+  return String(fromQuery || '').trim();
+}
+
+function buildLogSnapshot() {
+  const hosts = [...new Set(liveLogs.map((entry) => entry.host).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const drives = [...new Set(liveLogs.map((entry) => entry.drive).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return {
+    logs: liveLogs,
+    hosts,
+    drives
+  };
+}
+
+function sseWrite(res, event, payload) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function publishLog(log) {
+  liveLogs.push(log);
+  if (liveLogs.length > maxLogEntries) {
+    liveLogs.splice(0, liveLogs.length - maxLogEntries);
+  }
+
+  for (const subscriber of [...logSubscribers]) {
+    try {
+      sseWrite(subscriber.res, 'log', log);
+    } catch {
+      clearInterval(subscriber.heartbeat);
+      logSubscribers.delete(subscriber);
+    }
+  }
+}
+
+function appendLog(entry) {
+  const log = {
+    id: nextLogId++,
+    timestamp: new Date().toISOString(),
+    level: String(entry.level || 'info'),
+    source: String(entry.source || 'server'),
+    message: String(entry.message || ''),
+    host: String(entry.host || ''),
+    drive: String(entry.drive || ''),
+    path: String(entry.path || ''),
+    method: String(entry.method || ''),
+    status: Number.isFinite(Number(entry.status)) ? Number(entry.status) : null,
+    durationMs: Number.isFinite(Number(entry.durationMs)) ? Number(entry.durationMs) : null
+  };
+  publishLog(log);
+  return log;
+}
+
+function startLiveLogStream(res) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive'
+  });
+  res.write('\n');
+  sseWrite(res, 'snapshot', buildLogSnapshot());
+
+  const subscriber = {
+    res,
+    heartbeat: setInterval(() => {
+      if (!res.writableEnded && !res.destroyed) {
+        res.write(': heartbeat\n\n');
+      }
+    }, logHeartbeatMs)
+  };
+
+  logSubscribers.add(subscriber);
+
+  const cleanup = () => {
+    clearInterval(subscriber.heartbeat);
+    logSubscribers.delete(subscriber);
+  };
+
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+}
+
+function shouldLogRequest(pathname) {
+  if (!pathname) {
+    return false;
+  }
+
+  if (pathname.startsWith('/admin/api/logs')) {
+    return false;
+  }
+
+  return pathname.startsWith('/admin/api/') || pathname.startsWith('/api/');
+}
+
+function levelFromStatus(statusCode) {
+  const status = Number(statusCode || 0);
+  if (status >= 500) {
+    return 'error';
+  }
+  if (status >= 400) {
+    return 'warning';
+  }
+  return 'info';
+}
+
 function normalizeMountProvider(value) {
   const normalized = String(value || 'rclone').toLowerCase();
   if (normalized === 's3') {
@@ -853,6 +1004,16 @@ async function handleAdminApi(req, res, url) {
 
   assertAdmin(req);
 
+  if (req.method === 'GET' && url.pathname === '/admin/api/logs') {
+    sendJson(res, 200, buildLogSnapshot());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/api/logs/stream') {
+    startLiveLogStream(res);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/admin/api/samba/status') {
     sendJson(res, 200, sambaManager.status());
     return;
@@ -1190,6 +1351,16 @@ async function handleAdminApi(req, res, url) {
       });
     }
 
+    appendLog({
+      source: 'admin',
+      level: 'info',
+      host: requestClientHost(req),
+      drive: disk.id,
+      message: `Created drive "${disk.name}"`,
+      path: url.pathname,
+      method: req.method
+    });
+
     sendJson(res, 201, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
     return;
   }
@@ -1290,6 +1461,15 @@ async function handleAdminApi(req, res, url) {
         smbPassword: nextPassword,
         applied: result
       });
+      appendLog({
+        source: 'admin',
+        level: 'info',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: `Rotated SMB password for drive "${diskId}"`,
+        path: url.pathname,
+        method: req.method
+      });
       return;
     }
 
@@ -1304,6 +1484,17 @@ async function handleAdminApi(req, res, url) {
         current.smbLastAppliedAt = new Date().toISOString();
         current.smbLastAppliedError = result.disk.applied ? null : result.disk.reason || 'Not applied';
         return draft;
+      });
+      appendLog({
+        source: 'admin',
+        level: result?.disk?.applied ? 'info' : 'warning',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: result?.disk?.applied
+          ? `Applied Samba settings for drive "${diskId}"`
+          : `Failed to fully apply Samba settings for drive "${diskId}"`,
+        path: url.pathname,
+        method: req.method
       });
       sendJson(res, 200, { result });
       return;
@@ -1329,6 +1520,16 @@ async function handleAdminApi(req, res, url) {
       });
       await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
         console.error('Failed to apply root share:', error.message);
+      });
+
+      appendLog({
+        source: 'admin',
+        level: 'info',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: `Deleted drive "${diskId}"`,
+        path: url.pathname,
+        method: req.method
       });
 
       sendNoContent(res);
@@ -1417,6 +1618,16 @@ async function handleApi(req, res, url) {
       await ensureDiskShareApplied(disk, metadata.settings);
     }
 
+    appendLog({
+      source: 'api',
+      level: 'info',
+      host: requestClientHost(req),
+      drive: disk.id,
+      message: `Created drive "${disk.id}" via API`,
+      path: url.pathname,
+      method: req.method
+    });
+
     sendJson(res, 201, { disk });
     return;
   }
@@ -1437,6 +1648,15 @@ async function handleApi(req, res, url) {
       if (deleteData) {
         await deleteDiskFilesDir(disk);
       }
+      appendLog({
+        source: 'api',
+        level: 'info',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: `Deleted drive "${diskId}" via API`,
+        path: url.pathname,
+        method: req.method
+      });
       sendNoContent(res);
       return;
     }
@@ -1467,6 +1687,15 @@ async function handleApi(req, res, url) {
           }
           return draft;
         });
+        appendLog({
+          source: 'backup',
+          level: 'info',
+          host: requestClientHost(req),
+          drive: diskId,
+          message: `Wrote file "${relPath}"`,
+          path: url.pathname,
+          method: req.method
+        });
         sendJson(res, 200, { ok: true });
         return;
       }
@@ -1484,6 +1713,15 @@ async function handleApi(req, res, url) {
       if (req.method === 'DELETE') {
         try {
           await unlink(filePath);
+          appendLog({
+            source: 'backup',
+            level: 'info',
+            host: requestClientHost(req),
+            drive: diskId,
+            message: `Deleted file "${relPath}"`,
+            path: url.pathname,
+            method: req.method
+          });
           sendNoContent(res);
           return;
         } catch (error) {
@@ -1578,6 +1816,31 @@ async function main() {
 
   const createHttpServer = (mode) =>
     createServer(async (req, res) => {
+      let requestUrl = { pathname: '', searchParams: new URLSearchParams() };
+      try {
+        requestUrl = parseUrl(req);
+      } catch {
+        // Continue without request-level logging if URL parsing fails.
+      }
+      const startedAt = Date.now();
+      const shouldLog = shouldLogRequest(requestUrl.pathname);
+
+      if (shouldLog) {
+        res.on('finish', () => {
+          appendLog({
+            source: 'http',
+            level: levelFromStatus(res.statusCode),
+            host: requestClientHost(req),
+            drive: inferDriveId(requestUrl.pathname, requestUrl.searchParams),
+            message: `${req.method} ${requestUrl.pathname} -> ${res.statusCode}`,
+            path: requestUrl.pathname,
+            method: req.method,
+            status: res.statusCode,
+            durationMs: Date.now() - startedAt
+          });
+        });
+      }
+
       try {
         await route(req, res, mode);
       } catch (error) {
@@ -1612,6 +1875,11 @@ async function main() {
       return;
     }
     shuttingDown = true;
+    for (const subscriber of [...logSubscribers]) {
+      clearInterval(subscriber.heartbeat);
+      subscriber.res.end();
+      logSubscribers.delete(subscriber);
+    }
     await mountManager.stop().catch(() => { });
     await Promise.all(
       servers.map(

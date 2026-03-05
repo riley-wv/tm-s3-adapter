@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const DEFAULT_DISK_FORM = {
   name: '',
@@ -32,6 +32,8 @@ const DEFAULT_MOUNT_FORM = {
   enabled: true,
   ensureMounted: false
 };
+
+const MAX_DASHBOARD_LOGS = 1000;
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -113,10 +115,26 @@ function formatTimestamp(value) {
   return new Date(value).toLocaleString();
 }
 
+function normalizeLogLevel(value) {
+  const level = String(value || '').toLowerCase();
+  if (level === 'error') return 'error';
+  if (level === 'warning' || level === 'warn') return 'warning';
+  return 'muted';
+}
+
+function parseEventData(event) {
+  try {
+    return JSON.parse(event?.data || '{}');
+  } catch {
+    return null;
+  }
+}
+
 function Icon({ name }) {
   const icons = {
     drives: '💾',
     cloud: '☁️',
+    logs: '📜',
     settings: '⚙️',
     logout: '👋',
     add: '✨',
@@ -161,6 +179,15 @@ export default function DashboardPage() {
   });
   const [diskForm, setDiskForm] = useState(DEFAULT_DISK_FORM);
   const [mountForm, setMountForm] = useState(DEFAULT_MOUNT_FORM);
+  const [logs, setLogs] = useState([]);
+  const [logHosts, setLogHosts] = useState([]);
+  const [logDrives, setLogDrives] = useState([]);
+  const [logsHostFilter, setLogsHostFilter] = useState('all');
+  const [logsDriveFilter, setLogsDriveFilter] = useState('all');
+  const [logsConnected, setLogsConnected] = useState(false);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState('');
+  const logsListRef = useRef(null);
 
   const mounts = dashboard?.mounts || [];
   const disks = dashboard?.disks || [];
@@ -168,6 +195,15 @@ export default function DashboardPage() {
   const mountOptions = useMemo(
     () => mounts.map((mount) => ({ id: mount.id, label: `${mount.name} (${mountRemoteDisplay(mount)})` })),
     [mounts]
+  );
+  const filteredLogs = useMemo(
+    () =>
+      logs.filter((entry) => {
+        const hostMatch = logsHostFilter === 'all' || entry.host === logsHostFilter;
+        const driveMatch = logsDriveFilter === 'all' || entry.drive === logsDriveFilter;
+        return hostMatch && driveMatch;
+      }),
+    [logs, logsDriveFilter, logsHostFilter]
   );
 
   const syncFormsFromState = (next) => {
@@ -236,6 +272,129 @@ export default function DashboardPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setLogs([]);
+      setLogHosts([]);
+      setLogDrives([]);
+      setLogsConnected(false);
+      setLogsLoading(false);
+      setLogsError('');
+      return;
+    }
+
+    let cancelled = false;
+    setLogsLoading(true);
+    setLogsError('');
+
+    (async () => {
+      try {
+        const payload = await api('/admin/api/logs');
+        if (cancelled) {
+          return;
+        }
+        setLogs(Array.isArray(payload?.logs) ? payload.logs.slice(-MAX_DASHBOARD_LOGS) : []);
+        setLogHosts(Array.isArray(payload?.hosts) ? payload.hosts : []);
+        setLogDrives(Array.isArray(payload?.drives) ? payload.drives : []);
+      } catch (snapshotError) {
+        if (!cancelled) {
+          setLogsError(snapshotError.message || 'Unable to load logs');
+        }
+      } finally {
+        if (!cancelled) {
+          setLogsLoading(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      return;
+    }
+
+    let closed = false;
+    let reconnectTimer = null;
+    let stream = null;
+
+    const connect = () => {
+      if (closed) {
+        return;
+      }
+
+      stream = new EventSource('/admin/api/logs/stream');
+
+      stream.onopen = () => {
+        setLogsConnected(true);
+        setLogsError('');
+      };
+
+      stream.addEventListener('snapshot', (event) => {
+        const payload = parseEventData(event);
+        if (!payload || closed) {
+          return;
+        }
+        setLogs(Array.isArray(payload.logs) ? payload.logs.slice(-MAX_DASHBOARD_LOGS) : []);
+        setLogHosts(Array.isArray(payload.hosts) ? payload.hosts : []);
+        setLogDrives(Array.isArray(payload.drives) ? payload.drives : []);
+      });
+
+      stream.addEventListener('log', (event) => {
+        const entry = parseEventData(event);
+        if (!entry || closed) {
+          return;
+        }
+
+        setLogs((prev) => {
+          const next = [...prev, entry];
+          return next.length > MAX_DASHBOARD_LOGS ? next.slice(next.length - MAX_DASHBOARD_LOGS) : next;
+        });
+
+        if (entry.host) {
+          setLogHosts((prev) => (prev.includes(entry.host) ? prev : [...prev, entry.host].sort((a, b) => a.localeCompare(b))));
+        }
+
+        if (entry.drive) {
+          setLogDrives((prev) => (prev.includes(entry.drive) ? prev : [...prev, entry.drive].sort((a, b) => a.localeCompare(b))));
+        }
+      });
+
+      stream.onerror = () => {
+        setLogsConnected(false);
+        setLogsError('Live stream disconnected, retrying...');
+        stream?.close();
+        if (!closed) {
+          reconnectTimer = setTimeout(connect, 2000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      stream?.close();
+    };
+  }, [authenticated]);
+
+  useEffect(() => {
+    if (activeTab !== 'logs') {
+      return;
+    }
+    const node = logsListRef.current;
+    if (!node) {
+      return;
+    }
+    node.scrollTop = node.scrollHeight;
+  }, [activeTab, filteredLogs]);
 
   const handleLogin = async (event) => {
     event.preventDefault();
@@ -541,6 +700,7 @@ export default function DashboardPage() {
   const navItems = [
     { id: 'drives', icon: 'drives', label: 'Drives', count: disks.length },
     { id: 'mounts', icon: 'cloud', label: 'Cloud Mounts', count: mounts.length },
+    { id: 'logs', icon: 'logs', label: 'Live Logs', count: logs.length },
     { id: 'settings', icon: 'settings', label: 'Settings' }
   ];
 
@@ -1197,6 +1357,103 @@ export default function DashboardPage() {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Logs Tab */}
+        {activeTab === 'logs' && (
+          <div className="animate-in">
+            <div className="page-header">
+              <h2>Live Logs</h2>
+              <p>Real-time activity across hosts and drives</p>
+            </div>
+
+            {logsError && (
+              <div className="banner error">
+                <span className="icon"><Icon name="warning" /></span>
+                <span>{logsError}</span>
+              </div>
+            )}
+
+            <div className="card">
+              <div className="section-header" style={{ marginBottom: 16 }}>
+                <h3>{filteredLogs.length} Log Entr{filteredLogs.length === 1 ? 'y' : 'ies'}</h3>
+                <div className="row">
+                  <span className={`status-pill ${logsConnected ? 'success' : 'warning'}`}>
+                    {logsConnected ? 'Live' : 'Reconnecting'}
+                  </span>
+                  <button
+                    className="btn sm"
+                    type="button"
+                    onClick={() => {
+                      setLogsHostFilter('all');
+                      setLogsDriveFilter('all');
+                    }}
+                  >
+                    Reset Filters
+                  </button>
+                </div>
+              </div>
+
+              <div className="logs-filters">
+                <div className="form-group">
+                  <label htmlFor="logs-host-filter">Host</label>
+                  <select
+                    id="logs-host-filter"
+                    value={logsHostFilter}
+                    onChange={(event) => setLogsHostFilter(event.target.value)}
+                  >
+                    <option value="all">All hosts</option>
+                    {logHosts.map((host) => (
+                      <option key={host} value={host}>{host}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="logs-drive-filter">Drive</label>
+                  <select
+                    id="logs-drive-filter"
+                    value={logsDriveFilter}
+                    onChange={(event) => setLogsDriveFilter(event.target.value)}
+                  >
+                    <option value="all">All drives</option>
+                    {logDrives.map((drive) => (
+                      <option key={drive} value={drive}>{drive}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {logsLoading ? (
+                <div className="loading-state" style={{ padding: '12px 0 6px' }}>
+                  <div className="spinner" />
+                  <p>Loading logs...</p>
+                </div>
+              ) : filteredLogs.length === 0 ? (
+                <div className="empty-state" style={{ padding: '28px 12px 12px' }}>
+                  <div className="icon">📜</div>
+                  <h4>No logs available</h4>
+                  <p>Activity will appear here as requests and backup events happen.</p>
+                </div>
+              ) : (
+                <div className="logs-list" ref={logsListRef}>
+                  {filteredLogs.map((entry) => (
+                    <div key={entry.id} className="log-entry">
+                      <div className="log-entry-meta">
+                        <span className="log-time">{formatTimestamp(entry.timestamp)}</span>
+                        <span className={`status-pill ${normalizeLogLevel(entry.level)}`}>
+                          {String(entry.level || 'info').toUpperCase()}
+                        </span>
+                        {entry.host && <span className="log-chip">Host: {entry.host}</span>}
+                        {entry.drive && <span className="log-chip">Drive: {entry.drive}</span>}
+                      </div>
+                      <div className="log-message">{entry.message}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

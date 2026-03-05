@@ -96,6 +96,12 @@ Implementation details for Time Machine compatibility:
 - Samba share is marked with `fruit:time machine = yes`.
 - Per-drive quotas are exposed as `fruit:time machine max size` when `quotaGb > 0`.
 - SMB writes are forced to root within the share path to avoid permission failures on mounted cloud filesystems.
+- Generated drive shares also include Apple fruit options such as `fruit:metadata = stream` and `fruit:posix_rename = yes` so host-managed Samba installs do not depend on global defaults.
+
+If backups still fail after selecting the disk:
+- Prefer SMB on port `445` on real VPS deployments (`VPS_SMB_PORT=445`, `VPS_SMB_PUBLIC_PORT=445`).
+- Verify your backing filesystem supports xattrs/streams; `streams_xattr` is required for reliable Time Machine behavior.
+- Test with a `local` storage-mode drive first. If local works but cloud-mount fails, the mount backend is the limiting factor.
 
 ## Admin/API auth
 
