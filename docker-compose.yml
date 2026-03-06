@@ -51,7 +51,7 @@ services:
     ports:
       - "127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}:${VPS_ADMIN_DASHBOARD_PORT:-8787}"
       - "127.0.0.1:${VPS_ADMIN_API_PORT:-8788}:${VPS_ADMIN_API_PORT:-8788}"
-      - "172.31.255.10:${VPS_SMB_PORT:-1445}:445"
+      - "172.31.255.10:${VPS_SMB_PORT:-445}:445"
       - "127.0.0.1:${VPS_SFTP_PORT:-2222}:${VPS_SFTP_PORT:-2222}"
     environment:
       NODE_ENV: "${NODE_ENV:-production}"
