@@ -3,6 +3,40 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        NODE_ENV: "${NODE_ENV:-production}"
+        VPS_ADMIN_DASHBOARD_PORT: "${VPS_ADMIN_DASHBOARD_PORT:-8787}"
+        VPS_ADMIN_API_PORT: "${VPS_ADMIN_API_PORT:-8788}"
+        VPS_DATA_DIR: "${VPS_DATA_DIR:-/data/vps}"
+        VPS_SMB_SHARE_ROOT: "${VPS_SMB_SHARE_ROOT:-/data/vps/smb-share}"
+        VPS_ADMIN_WEB_ROOT: "${VPS_ADMIN_WEB_ROOT:-/app/web/vps-public}"
+        VPS_API_TOKEN: "${VPS_API_TOKEN}"
+        VPS_ADMIN_USERNAME: "${VPS_ADMIN_USERNAME}"
+        VPS_ADMIN_PASSWORD: "${VPS_ADMIN_PASSWORD}"
+        VPS_ADMIN_SESSION_SECONDS: "${VPS_ADMIN_SESSION_SECONDS:-43200}"
+        VPS_SAMBA_MANAGE_ENABLED: "${VPS_SAMBA_MANAGE_ENABLED:-true}"
+        VPS_SAMBA_STREAMS_BACKEND: "${VPS_SAMBA_STREAMS_BACKEND:-xattr}"
+        VPS_SMB_PUBLIC_PORT: "${VPS_SMB_PUBLIC_PORT:-445}"
+        VPS_SAMBA_CONF_DIR: "${VPS_SAMBA_CONF_DIR:-/etc/samba/smb.conf.d/tm-adapter}"
+        VPS_SAMBA_MAIN_CONF: "${VPS_SAMBA_MAIN_CONF:-/etc/samba/smb.conf}"
+        VPS_SAMBA_GENERATED_CONF: "${VPS_SAMBA_GENERATED_CONF:-/etc/samba/smb.conf.d/tm-adapter/_generated.conf}"
+        VPS_SAMBA_INCLUDE_LINE: "${VPS_SAMBA_INCLUDE_LINE:-include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf}"
+        VPS_SAMBA_RESTART_CMD: "${VPS_SAMBA_RESTART_CMD:-smbcontrol all reload-config || pkill -HUP smbd || true}"
+        VPS_MOUNT_MANAGE_ENABLED: "${VPS_MOUNT_MANAGE_ENABLED:-true}"
+        VPS_MOUNT_POLL_SECONDS: "${VPS_MOUNT_POLL_SECONDS:-30}"
+        VPS_RCLONE_CACHE_DIR: "${VPS_RCLONE_CACHE_DIR:-/data/vps/rclone-vfs-cache}"
+        VPSD_RCLONE_BINARY: "${VPSD_RCLONE_BINARY:-rclone}"
+        VPS_SFTP_PORT: "${VPS_SFTP_PORT:-2222}"
+        VPS_SFTP_USERNAME: "${VPS_SFTP_USERNAME:-tmbackup}"
+        VPS_SFTP_PASSWORD: "${VPS_SFTP_PASSWORD}"
+        VPS_SFTP_UID: "${VPS_SFTP_UID:-10000}"
+        VPS_SFTP_GID: "${VPS_SFTP_GID:-10000}"
+        VPS_POSTGRES_HOST: "${VPS_POSTGRES_HOST:-postgres}"
+        VPS_POSTGRES_PORT: "${VPS_POSTGRES_PORT:-5432}"
+        VPS_POSTGRES_DATABASE: "${VPS_POSTGRES_DATABASE:-tm_adapter}"
+        VPS_POSTGRES_USER: "${VPS_POSTGRES_USER:-tm_adapter}"
+        VPS_POSTGRES_PASSWORD: "${VPS_POSTGRES_PASSWORD}"
+        VPS_POSTGRES_SSL_MODE: "${VPS_POSTGRES_SSL_MODE:-disable}"
     container_name: tm-adapter-vps
     restart: unless-stopped
     cap_add:
@@ -15,43 +49,44 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}:8787"
-      - "127.0.0.1:${VPS_ADMIN_API_PORT:-8788}:8788"
+      - "127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}:${VPS_ADMIN_DASHBOARD_PORT:-8787}"
+      - "127.0.0.1:${VPS_ADMIN_API_PORT:-8788}:${VPS_ADMIN_API_PORT:-8788}"
       - "127.0.0.1:${VPS_SMB_PORT:-1445}:445"
-      - "127.0.0.1:${VPS_SFTP_PORT:-2222}:2222"
+      - "127.0.0.1:${VPS_SFTP_PORT:-2222}:${VPS_SFTP_PORT:-2222}"
     environment:
-      VPS_ADMIN_DASHBOARD_PORT: "8787"
-      VPS_ADMIN_API_PORT: "8788"
-      VPS_DATA_DIR: /data/vps
-      VPS_SMB_SHARE_ROOT: /data/vps/smb-share
-      VPS_ADMIN_WEB_ROOT: /app/web/vps-public
+      NODE_ENV: "${NODE_ENV:-production}"
+      VPS_ADMIN_DASHBOARD_PORT: "${VPS_ADMIN_DASHBOARD_PORT:-8787}"
+      VPS_ADMIN_API_PORT: "${VPS_ADMIN_API_PORT:-8788}"
+      VPS_DATA_DIR: "${VPS_DATA_DIR:-/data/vps}"
+      VPS_SMB_SHARE_ROOT: "${VPS_SMB_SHARE_ROOT:-/data/vps/smb-share}"
+      VPS_ADMIN_WEB_ROOT: "${VPS_ADMIN_WEB_ROOT:-/app/web/vps-public}"
       VPS_API_TOKEN: "${VPS_API_TOKEN}"
-      VPS_ADMIN_USERNAME: "${VPS_ADMIN_USERNAME}"
+      VPS_ADMIN_USERNAME: "${VPS_ADMIN_USERNAME:-admin}"
       VPS_ADMIN_PASSWORD: "${VPS_ADMIN_PASSWORD}"
-      VPS_ADMIN_SESSION_SECONDS: "${VPS_ADMIN_SESSION_SECONDS}"
-      VPS_SAMBA_MANAGE_ENABLED: "${VPS_SAMBA_MANAGE_ENABLED}"
-      VPS_SAMBA_STREAMS_BACKEND: "${VPS_SAMBA_STREAMS_BACKEND}"
-      VPS_SMB_PUBLIC_PORT: "${VPS_SMB_PUBLIC_PORT}"
-      VPS_SAMBA_CONF_DIR: /etc/samba/smb.conf.d/tm-adapter
-      VPS_SAMBA_MAIN_CONF: /etc/samba/smb.conf
-      VPS_SAMBA_GENERATED_CONF: /etc/samba/smb.conf.d/tm-adapter/_generated.conf
-      VPS_SAMBA_INCLUDE_LINE: "include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf"
-      VPS_SAMBA_RESTART_CMD: "smbcontrol all reload-config || pkill -HUP smbd || true"
-      VPS_MOUNT_MANAGE_ENABLED: "${VPS_MOUNT_MANAGE_ENABLED}"
-      VPS_MOUNT_POLL_SECONDS: "${VPS_MOUNT_POLL_SECONDS}"
+      VPS_ADMIN_SESSION_SECONDS: "${VPS_ADMIN_SESSION_SECONDS:-43200}"
+      VPS_SAMBA_MANAGE_ENABLED: "${VPS_SAMBA_MANAGE_ENABLED:-true}"
+      VPS_SAMBA_STREAMS_BACKEND: "${VPS_SAMBA_STREAMS_BACKEND:-xattr}"
+      VPS_SMB_PUBLIC_PORT: "${VPS_SMB_PUBLIC_PORT:-445}"
+      VPS_SAMBA_CONF_DIR: "${VPS_SAMBA_CONF_DIR:-/etc/samba/smb.conf.d/tm-adapter}"
+      VPS_SAMBA_MAIN_CONF: "${VPS_SAMBA_MAIN_CONF:-/etc/samba/smb.conf}"
+      VPS_SAMBA_GENERATED_CONF: "${VPS_SAMBA_GENERATED_CONF:-/etc/samba/smb.conf.d/tm-adapter/_generated.conf}"
+      VPS_SAMBA_INCLUDE_LINE: "${VPS_SAMBA_INCLUDE_LINE:-include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf}"
+      VPS_SAMBA_RESTART_CMD: "${VPS_SAMBA_RESTART_CMD:-smbcontrol all reload-config || pkill -HUP smbd || true}"
+      VPS_MOUNT_MANAGE_ENABLED: "${VPS_MOUNT_MANAGE_ENABLED:-true}"
+      VPS_MOUNT_POLL_SECONDS: "${VPS_MOUNT_POLL_SECONDS:-30}"
       VPS_RCLONE_CACHE_DIR: "${VPS_RCLONE_CACHE_DIR:-/data/vps/rclone-vfs-cache}"
-      VPSD_RCLONE_BINARY: rclone
-      VPS_SFTP_PORT: "2222"
-      VPS_SFTP_USERNAME: "${VPS_SFTP_USERNAME}"
+      VPSD_RCLONE_BINARY: "${VPSD_RCLONE_BINARY:-rclone}"
+      VPS_SFTP_PORT: "${VPS_SFTP_PORT:-2222}"
+      VPS_SFTP_USERNAME: "${VPS_SFTP_USERNAME:-tmbackup}"
       VPS_SFTP_PASSWORD: "${VPS_SFTP_PASSWORD}"
-      VPS_SFTP_UID: "${VPS_SFTP_UID}"
-      VPS_SFTP_GID: "${VPS_SFTP_GID}"
-      VPS_POSTGRES_HOST: "${VPS_POSTGRES_HOST}"
-      VPS_POSTGRES_PORT: "${VPS_POSTGRES_PORT}"
-      VPS_POSTGRES_DATABASE: "${VPS_POSTGRES_DATABASE}"
-      VPS_POSTGRES_USER: "${VPS_POSTGRES_USER}"
+      VPS_SFTP_UID: "${VPS_SFTP_UID:-10000}"
+      VPS_SFTP_GID: "${VPS_SFTP_GID:-10000}"
+      VPS_POSTGRES_HOST: "${VPS_POSTGRES_HOST:-postgres}"
+      VPS_POSTGRES_PORT: "${VPS_POSTGRES_PORT:-5432}"
+      VPS_POSTGRES_DATABASE: "${VPS_POSTGRES_DATABASE:-tm_adapter}"
+      VPS_POSTGRES_USER: "${VPS_POSTGRES_USER:-tm_adapter}"
       VPS_POSTGRES_PASSWORD: "${VPS_POSTGRES_PASSWORD}"
-      VPS_POSTGRES_SSL_MODE: "${VPS_POSTGRES_SSL_MODE}"
+      VPS_POSTGRES_SSL_MODE: "${VPS_POSTGRES_SSL_MODE:-disable}"
       VPS_ENTERPRISE_FEATURES_ENABLED_DEFAULT: "${VPS_ENTERPRISE_FEATURES_ENABLED_DEFAULT:-}"
       VPS_ENTERPRISE_FEATURES_ENABLED_FORCE: "${VPS_ENTERPRISE_FEATURES_ENABLED_FORCE:-}"
       VPS_ADMIN_AUTH_MODE_DEFAULT: "${VPS_ADMIN_AUTH_MODE_DEFAULT:-}"
@@ -107,7 +142,7 @@ services:
       VPS_POSTGRES_SSL_MODE_DEFAULT: "${VPS_POSTGRES_SSL_MODE_DEFAULT:-}"
       VPS_POSTGRES_SSL_MODE_FORCE: "${VPS_POSTGRES_SSL_MODE_FORCE:-}"
     volumes:
-      - ./data/vps:/data/vps
+      - ./data/vps:${VPS_DATA_DIR:-/data/vps}
       - ./data/mnt:/mnt/tm-cloud
       - ./data/rclone:/root/.config/rclone
 
@@ -115,13 +150,13 @@ services:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: "${VPS_POSTGRES_DATABASE}"
-      POSTGRES_USER: "${VPS_POSTGRES_USER}"
+      POSTGRES_DB: "${VPS_POSTGRES_DATABASE:-tm_adapter}"
+      POSTGRES_USER: "${VPS_POSTGRES_USER:-tm_adapter}"
       POSTGRES_PASSWORD: "${VPS_POSTGRES_PASSWORD}"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${VPS_POSTGRES_USER} -d ${VPS_POSTGRES_DATABASE}"]
+      test: ["CMD-SHELL", "pg_isready -U ${VPS_POSTGRES_USER:-tm_adapter} -d ${VPS_POSTGRES_DATABASE:-tm_adapter}"]
       interval: 5s
       timeout: 5s
       retries: 20
