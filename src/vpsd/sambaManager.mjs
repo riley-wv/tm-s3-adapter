@@ -31,6 +31,7 @@ function shareConfig(disk, streamsBackend) {
   return `[${disk.smbShareName}]
 path = ${disk.storagePath}
 valid users = ${disk.smbUsername}
+guest ok = no
 force user = root
 force group = root
 read only = no
@@ -38,7 +39,7 @@ browseable = yes
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = catia fruit ${streamsBackend}
+vfs objects = acl_xattr catia fruit ${streamsBackend}
 fruit:aapl = yes
 fruit:time machine = yes
 fruit:metadata = stream
@@ -67,7 +68,7 @@ force group = root
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = catia fruit ${streamsBackend}
+vfs objects = acl_xattr catia fruit ${streamsBackend}
 fruit:aapl = yes
 fruit:time machine = yes
 fruit:metadata = stream
