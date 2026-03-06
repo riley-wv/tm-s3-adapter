@@ -15,7 +15,18 @@ function shellQuote(value) {
   return `'${safe}'`;
 }
 
-function shareConfig(disk) {
+function normalizeStreamsBackend(value) {
+  const normalized = String(value || 'xattr').trim().toLowerCase();
+  if (normalized === 'depot' || normalized === 'streams_depot') {
+    return 'streams_depot';
+  }
+  if (normalized === 'xattr' || normalized === 'streams_xattr') {
+    return 'streams_xattr';
+  }
+  return 'streams_xattr';
+}
+
+function shareConfig(disk, streamsBackend) {
   const quotaLine = Number(disk.quotaGb) > 0 ? `fruit:time machine max size = ${Math.floor(Number(disk.quotaGb))}G\n` : '';
   return `[${disk.smbShareName}]
 path = ${disk.storagePath}
@@ -26,7 +37,7 @@ read only = no
 browseable = yes
 create mask = 0660
 directory mask = 0770
-vfs objects = catia fruit streams_xattr
+vfs objects = catia fruit ${streamsBackend}
 fruit:time machine = yes
 fruit:metadata = stream
 fruit:posix_rename = yes
@@ -39,7 +50,7 @@ spotlight = no
 `;
 }
 
-function rootShareConfig(shareName, path) {
+function rootShareConfig(shareName, path, streamsBackend) {
   return `[${shareName}]
 path = ${path}
 read only = no
@@ -49,7 +60,7 @@ force user = root
 force group = root
 create mask = 0660
 directory mask = 0770
-vfs objects = catia fruit streams_xattr
+vfs objects = catia fruit ${streamsBackend}
 fruit:time machine = yes
 fruit:metadata = stream
 fruit:posix_rename = yes
@@ -65,6 +76,7 @@ spotlight = no
 export class SambaManager {
   constructor() {
     this.enabled = boolFromEnv(process.env.VPS_SAMBA_MANAGE_ENABLED, false);
+    this.streamsBackend = normalizeStreamsBackend(process.env.VPS_SAMBA_STREAMS_BACKEND);
     this.confDir = process.env.VPS_SAMBA_CONF_DIR || '/etc/samba/smb.conf.d/tm-adapter';
     this.mainConf = process.env.VPS_SAMBA_MAIN_CONF || '/etc/samba/smb.conf';
     this.generatedConfPath = process.env.VPS_SAMBA_GENERATED_CONF || join(this.confDir, '_generated.conf');
@@ -76,8 +88,14 @@ export class SambaManager {
     return {
       enabled: this.enabled,
       confDir: this.confDir,
-      mainConf: this.mainConf
+      mainConf: this.mainConf,
+      streamsBackend: this.streamsBackend
     };
+  }
+
+  setStreamsBackend(value) {
+    this.streamsBackend = normalizeStreamsBackend(value);
+    return this.streamsBackend;
   }
 
   async applyDisk(disk) {
@@ -115,7 +133,7 @@ export class SambaManager {
     await mkdir(this.confDir, { recursive: true });
     await this.ensureIncludeLine();
     await mkdir(path, { recursive: true });
-    await writeFile(join(this.confDir, '_root.conf'), rootShareConfig(shareName, path), 'utf8');
+    await writeFile(join(this.confDir, '_root.conf'), rootShareConfig(shareName, path, this.streamsBackend), 'utf8');
     await this.syncGeneratedConfig();
     await this.restartSamba();
     return { applied: true, share: shareName, path };
@@ -155,7 +173,7 @@ export class SambaManager {
     await runCommand('sh', ['-lc', `chown -R root:root ${shellQuote(disk.storagePath)} && chmod 0770 ${shellQuote(disk.storagePath)}`]).catch(() => {
       // Best-effort in case storagePath is a managed cloud mount with restricted ownership semantics.
     });
-    await writeFile(this.shareFilePath(disk), shareConfig(disk), 'utf8');
+    await writeFile(this.shareFilePath(disk), shareConfig(disk, this.streamsBackend), 'utf8');
   }
 
   async syncGeneratedConfig() {

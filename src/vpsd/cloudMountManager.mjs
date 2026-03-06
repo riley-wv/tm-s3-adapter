@@ -10,6 +10,39 @@ function toBool(value, fallback = false) {
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
 
+function toPositiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  const normalized = Math.floor(parsed);
+  if (normalized < min) {
+    return min;
+  }
+  if (normalized > max) {
+    return max;
+  }
+  return normalized;
+}
+
+function normalizeCachePolicy(policy = {}) {
+  return {
+    enabled: policy?.enabled !== false,
+    writeBackSeconds: toPositiveInt(policy?.writeBackSeconds, 120, { min: 5, max: 86400 }),
+    maxSizeGb: toPositiveInt(policy?.maxSizeGb, 1, { min: 1, max: 10240 }),
+    maxAgeHours: toPositiveInt(policy?.maxAgeHours, 24, { min: 1, max: 720 }),
+    readAheadMb: toPositiveInt(policy?.readAheadMb, 16, { min: 1, max: 2048 })
+  };
+}
+
+function normalizeCacheDir(value, fallback = '/data/vps/rclone-vfs-cache') {
+  const next = String(value || '').trim();
+  if (!next) {
+    return fallback;
+  }
+  return next.replace(/[\\\r\n\t\0]/g, '');
+}
+
 function isCommandNotFound(error) {
   return error?.code === 'ENOENT' || /spawn .* ENOENT/i.test(String(error?.message || ''));
 }
@@ -148,6 +181,9 @@ export class CloudMountManager {
   constructor() {
     this.enabled = toBool(process.env.VPS_MOUNT_MANAGE_ENABLED, true);
     this.pollSeconds = Math.max(10, Number(process.env.VPS_MOUNT_POLL_SECONDS || 30));
+    this.cacheDir = normalizeCacheDir(process.env.VPS_RCLONE_CACHE_DIR, '/data/vps/rclone-vfs-cache');
+    this.cachePolicy = normalizeCachePolicy();
+    this.cacheGeneration = 1;
     this.mounts = new Map();
     this.timer = null;
   }
@@ -156,6 +192,8 @@ export class CloudMountManager {
     return {
       enabled: this.enabled,
       pollSeconds: this.pollSeconds,
+      cacheDir: this.cacheDir,
+      cachePolicy: this.cachePolicy,
       mounts: Array.from(this.mounts.values()).map((entry) => ({
         id: entry.id,
         name: entry.name,
@@ -181,10 +219,54 @@ export class CloudMountManager {
         lastCheckedAt: previous?.lastCheckedAt || null,
         lastMountedAt: previous?.lastMountedAt || null,
         lastError: previous?.lastError || null,
-        lastStatus: previous?.lastStatus || 'unknown'
+        lastStatus: previous?.lastStatus || 'unknown',
+        lastCacheGeneration: previous?.lastCacheGeneration || 0
       });
     }
     this.mounts = next;
+  }
+
+  setCachePolicy(policy = {}) {
+    const normalized = normalizeCachePolicy(policy);
+    const changed = JSON.stringify(normalized) !== JSON.stringify(this.cachePolicy);
+    this.cachePolicy = normalized;
+    if (changed) {
+      this.cacheGeneration += 1;
+    }
+  }
+
+  setCacheDir(dirPath) {
+    const normalized = normalizeCacheDir(dirPath, this.cacheDir);
+    if (normalized === this.cacheDir) {
+      return false;
+    }
+    this.cacheDir = normalized;
+    this.cacheGeneration += 1;
+    return true;
+  }
+
+  setPollSeconds(value) {
+    const next = toPositiveInt(value, this.pollSeconds, { min: 10, max: 86400 });
+    if (next === this.pollSeconds) {
+      return false;
+    }
+    this.pollSeconds = next;
+    if (this.timer) {
+      this.startPollLoop();
+    }
+    return true;
+  }
+
+  startPollLoop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    this.timer = setInterval(() => {
+      this.ensureAll().catch((error) => {
+        console.error('[mount-manager] ensureAll failed:', error.message);
+      });
+    }, this.pollSeconds * 1000);
   }
 
   async start() {
@@ -193,11 +275,7 @@ export class CloudMountManager {
     }
 
     await this.ensureAll();
-    this.timer = setInterval(() => {
-      this.ensureAll().catch((error) => {
-        console.error('[mount-manager] ensureAll failed:', error.message);
-      });
-    }, this.pollSeconds * 1000);
+    this.startPollLoop();
   }
 
   async stop() {
@@ -239,6 +317,12 @@ export class CloudMountManager {
 
     const alreadyMounted = await this.isMounted(mount.mountPath);
     if (alreadyMounted) {
+      const cachePolicyChanged = (mount.lastCacheGeneration || 0) !== this.cacheGeneration;
+      if (cachePolicyChanged && allowRepair) {
+        await this.unmount(mountId).catch(() => { });
+        return this.ensureMount(mountId, { allowRepair: false });
+      }
+
       const health = await this.checkMountHealth(mount.mountPath);
       if (!health.ok) {
         const healthError = withMountTroubleshooting(
@@ -260,10 +344,14 @@ export class CloudMountManager {
 
       mount.lastStatus = 'mounted';
       mount.lastError = null;
+      mount.lastCacheGeneration = this.cacheGeneration;
       return { ok: true, mounted: true, alreadyMounted: true };
     }
 
-    const { command, args } = this.buildMountCommand(mount);
+    const { command, args, cacheDir } = this.buildMountCommand(mount);
+    if (cacheDir) {
+      await ensureDir(cacheDir);
+    }
 
     try {
       await runCommand(command, args);
@@ -282,6 +370,7 @@ export class CloudMountManager {
       mount.lastStatus = 'mounted';
       mount.lastError = null;
       mount.lastMountedAt = new Date().toISOString();
+      mount.lastCacheGeneration = this.cacheGeneration;
       return { ok: true, mounted: true, alreadyMounted: false };
     } catch (error) {
       const finalError = withMountTroubleshooting(withMissingCommandHint(error, command), mount, command);
@@ -325,6 +414,8 @@ export class CloudMountManager {
     const provider = normalizeProvider(mount.provider || 'rclone');
     const rcloneBinary = mount.rcloneBinary || process.env.VPSD_RCLONE_BINARY || 'rclone';
     const extraArgs = Array.isArray(mount.extraArgs) ? mount.extraArgs : [];
+    const cachePolicy = this.cachePolicy || normalizeCachePolicy();
+    const effectiveCacheMode = cachePolicy.enabled ? 'full' : 'off';
     let remotePath = mount.remotePath || defaultRemotePathForProvider(provider);
     if (provider === 's3') {
       remotePath = buildS3RemoteSpec(mount);
@@ -332,6 +423,21 @@ export class CloudMountManager {
     if (!remotePath) {
       throw new Error(`Mount ${mount.id} requires remotePath (or S3 fields)`);
     }
+
+    const cacheArgs = cachePolicy.enabled
+      ? [
+        '--cache-dir',
+        `${this.cacheDir}/${mount.id}`,
+        '--vfs-write-back',
+        `${cachePolicy.writeBackSeconds}s`,
+        '--vfs-cache-max-size',
+        `${cachePolicy.maxSizeGb}G`,
+        '--vfs-cache-max-age',
+        `${cachePolicy.maxAgeHours}h`,
+        '--buffer-size',
+        `${cachePolicy.readAheadMb}M`
+      ]
+      : [];
 
     return {
       command: rcloneBinary,
@@ -341,13 +447,14 @@ export class CloudMountManager {
         mount.mountPath,
         '--daemon',
         '--vfs-cache-mode',
-        mount.vfsCacheMode || 'full',
+        effectiveCacheMode,
         '--dir-cache-time',
         mount.dirCacheTime || '10m',
         '--poll-interval',
         mount.pollInterval || '30s',
         ...extraArgs
-      ]
+      ].concat(cacheArgs),
+      cacheDir: cachePolicy.enabled ? `${this.cacheDir}/${mount.id}` : ''
     };
   }
 

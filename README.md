@@ -34,6 +34,7 @@ cp .env.example .env
 - `VPS_ADMIN_PASSWORD`
 - `VPS_API_TOKEN`
 - `VPS_SFTP_PASSWORD`
+- `VPS_POSTGRES_PASSWORD`
 
 3. Start:
 
@@ -101,11 +102,26 @@ Persistent rclone config path:
 Per generated Samba share:
 
 - `fruit:time machine = yes`
-- `vfs objects = catia fruit streams_xattr`
+- `vfs objects = catia fruit streams_<backend>` (default backend: `xattr`)
 - `force user = root` and `force group = root`
 - Optional quota via `fruit:time machine max size` when `quotaGb > 0`
 
+If SMB clients can connect but writes fail with I/O errors, try `VPS_SAMBA_STREAMS_BACKEND=depot`.
+
 If backups fail, prefer validating with a `local` storage-mode disk first, then move to cloud mounts.
+
+For cloud-mounted disks, VPS read/write cache settings (write-back delay, max cache size, cache age, read buffer) are available in Dashboard -> Settings and apply to both SMB and SFTP traffic.
+
+## Optional enterprise settings (UI + env)
+
+- Local username/password auth remains the default.
+- Enterprise/security/auth settings can be managed in Dashboard onboarding/settings or through env vars.
+- Dual-source precedence is:
+  - `<NAME>_FORCE` env (locked)
+  - UI-saved value
+  - `<NAME>_DEFAULT` env
+  - app default
+- Enterprise mode is optional; Postgres-backed setup/settings config storage is required.
 
 ## Development commands
 

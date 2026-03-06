@@ -32,6 +32,7 @@ Edit `.env` and set secure values:
 VPS_API_TOKEN=<long-random-token>
 VPS_ADMIN_PASSWORD=<long-random-password>
 VPS_SFTP_PASSWORD=<long-random-password>
+VPS_POSTGRES_PASSWORD=<long-random-password>
 ```
 
 Recommended for local macOS Docker usage:
@@ -82,6 +83,13 @@ Complete initial setup values:
 - `smbPublicPort`: port embedded in generated SMB URLs
 
 The setup call stores values in metadata and can apply root Samba share config.
+
+Optional enterprise onboarding:
+
+- You can enable enterprise mode during onboarding.
+- Every enterprise setting is also available later in Dashboard -> Settings.
+- If a setting is provided via `*_FORCE` env var, the UI will show it as locked/read-only.
+- Setup/settings config is stored in Postgres, so Postgres must be configured.
 
 ## 5. Create your first drive (local mode)
 
@@ -185,12 +193,18 @@ At minimum, back up:
 
 - Use SMB port 445 where possible in production
 - Validate xattrs/streams support (`streams_xattr`)
+- If clients can connect but all writes fail with I/O errors, set `VPS_SAMBA_STREAMS_BACKEND=depot` and restart the container
 - Test a `local` drive first to isolate cloud mount issues
 
 ### Cannot access dashboard/API
 
 - Confirm loopback port mapping in `docker-compose.yml`
 - Confirm tunnel/proxy target (if used) points to host loopback ports
+
+### Enterprise mode fails to enable
+
+- Verify Postgres is enabled/configured (host, port, database, user, password).
+- Check whether a `*_FORCE` env variable is locking a field you are trying to change in UI.
 
 ### SFTP login fails
 

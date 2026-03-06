@@ -43,11 +43,12 @@ Authorization: Bearer <VPS_API_TOKEN>
 ## Common admin endpoints
 
 - `GET /admin/api/state`
-  - Full dashboard state: settings, samba/sftp info, mounts, disks
+  - Full dashboard state: settings, `settingsConfig` (value/source/locked per dual-source setting), samba/sftp info, mounts, disks, postgres readiness
 - `PUT /admin/api/settings`
-  - Update global settings (`hostname`, `rootShareName`, `smbPublicPort`, feature toggles)
+  - Update global settings (`hostname`, `rootShareName`, `smbPublicPort`, feature toggles, SMB streams backend, mount poll interval, auth/session settings, VPS cache knobs, enterprise/auth/directory/OIDC/postgres settings)
+  - Returns HTTP `400` if attempting to update a setting locked by `*_FORCE` env
 - `POST /admin/api/setup`
-  - Initial setup workflow (can set admin credentials and mark setup complete)
+  - Initial setup workflow (same setting coverage as `/admin/api/settings`, plus setup completion)
 - `GET /admin/api/samba/status`
   - Samba manager runtime status
 
@@ -153,5 +154,7 @@ curl -sS \
 ## Notes
 
 - Admin sessions are in-memory only and are cleared on service restart.
+- Dual-source settings precedence is: `*_FORCE` env -> UI value -> `*_DEFAULT` env -> app default.
+- Setup/settings config persistence requires Postgres to be enabled and configured.
 - Many admin/public write operations return HTTP `409` for ID/name conflicts.
 - Mount and Samba operations can fail with actionable error messages; inspect `/admin/api/state` runtime sections for details.

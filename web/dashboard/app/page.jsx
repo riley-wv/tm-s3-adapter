@@ -34,12 +34,51 @@ const DEFAULT_MOUNT_FORM = {
 };
 
 const DEFAULT_SETTINGS_FORM = {
+  adminUsername: '',
+  adminPassword: '',
+  apiToken: '',
+  adminSessionSeconds: '43200',
   hostname: '',
   rootShareName: 'timemachine',
   smbPublicPort: '445',
   smbEnabled: true,
   sftpEnabled: true,
-  mountManagementEnabled: true
+  mountManagementEnabled: true,
+  smbStreamsBackend: 'xattr',
+  mountPollSeconds: '30',
+  vpsCacheDir: '/data/vps/rclone-vfs-cache',
+  vpsCacheEnabled: true,
+  vpsWriteBackSeconds: '120',
+  vpsCacheMaxSizeGb: '1',
+  vpsCacheMaxAgeHours: '24',
+  vpsReadAheadMb: '16',
+  enterpriseFeaturesEnabled: false,
+  adminAuthMode: 'local',
+  smbAuthMode: 'local',
+  sftpAuthMode: 'local',
+  securityIpAllowlist: '',
+  securityBreakGlassEnabled: true,
+  securityAuditRetentionDays: '180',
+  oidcIssuer: '',
+  oidcClientId: '',
+  oidcClientSecret: '',
+  oidcScopes: 'openid profile email groups',
+  oidcAdminGroup: '',
+  oidcReadOnlyGroup: '',
+  directoryDomain: '',
+  directoryRealm: '',
+  directoryUrl: '',
+  directoryBindDn: '',
+  directoryBindPassword: '',
+  workgroupMappingsJson: '[]',
+  mountPolicyMode: 'policy_templates',
+  postgresEnabled: true,
+  postgresHost: 'postgres',
+  postgresPort: '5432',
+  postgresDatabase: 'tm_adapter',
+  postgresUser: 'tm_adapter',
+  postgresPassword: '',
+  postgresSslMode: 'disable'
 };
 
 const MAX_DASHBOARD_LOGS = 1000;
@@ -215,9 +254,41 @@ export default function DashboardPage() {
   const [setupForm, setSetupForm] = useState({
     adminUsername: '',
     adminPassword: '',
+    apiToken: '',
+    adminSessionSeconds: '43200',
+    vpsCacheDir: '/data/vps/rclone-vfs-cache',
     hostname: '',
     rootShareName: 'timemachine',
-    smbPublicPort: '445'
+    smbPublicPort: '445',
+    smbStreamsBackend: 'xattr',
+    mountPollSeconds: '30',
+    enterpriseFeaturesEnabled: false,
+    adminAuthMode: 'local',
+    smbAuthMode: 'local',
+    sftpAuthMode: 'local',
+    securityIpAllowlist: '',
+    securityBreakGlassEnabled: true,
+    securityAuditRetentionDays: '180',
+    oidcIssuer: '',
+    oidcClientId: '',
+    oidcClientSecret: '',
+    oidcScopes: 'openid profile email groups',
+    oidcAdminGroup: '',
+    oidcReadOnlyGroup: '',
+    directoryDomain: '',
+    directoryRealm: '',
+    directoryUrl: '',
+    directoryBindDn: '',
+    directoryBindPassword: '',
+    workgroupMappingsJson: '[]',
+    mountPolicyMode: 'policy_templates',
+    postgresEnabled: true,
+    postgresHost: 'postgres',
+    postgresPort: '5432',
+    postgresDatabase: 'tm_adapter',
+    postgresUser: 'tm_adapter',
+    postgresPassword: '',
+    postgresSslMode: 'disable'
   });
   const [diskForm, setDiskForm] = useState(DEFAULT_DISK_FORM);
   const [mountForm, setMountForm] = useState(DEFAULT_MOUNT_FORM);
@@ -251,8 +322,21 @@ export default function DashboardPage() {
   const [terminalOutput, setTerminalOutput] = useState('');
   const terminalOutputRef = useRef(null);
 
+  const [theme, setTheme] = useState('system');
+
   const mounts = dashboard?.mounts || [];
   const disks = dashboard?.disks || [];
+  const settingsConfig = dashboard?.settingsConfig || {};
+
+  const settingSourceLabel = (key) => {
+    const source = settingsConfig?.[key]?.source || 'app_default';
+    if (source === 'force_env') return 'forced by env';
+    if (source === 'default_env') return 'env default';
+    if (source === 'ui') return 'ui';
+    return 'app default';
+  };
+
+  const isSettingLocked = (key) => settingsConfig?.[key]?.locked === true;
 
   const mountOptions = useMemo(
     () => mounts.map((mount) => ({ id: mount.id, label: `${mount.name} (${mountRemoteDisplay(mount)})` })),
@@ -268,22 +352,105 @@ export default function DashboardPage() {
       }),
     [logs, logsDriveFilter, logsHostFilter]
   );
+  const stripLockedSettingsFromPayload = useCallback((payload) => {
+    if (!settingsConfig || typeof settingsConfig !== 'object') {
+      return payload;
+    }
+    const next = { ...payload };
+    for (const [key, descriptor] of Object.entries(settingsConfig)) {
+      if (descriptor?.locked) {
+        delete next[key];
+      }
+    }
+    return next;
+  }, [settingsConfig]);
 
   const syncFormsFromState = (next) => {
     setSettingsForm({
+      adminUsername: next?.settings?.adminUsername || currentUser || 'admin',
+      adminPassword: '',
+      apiToken: '',
+      adminSessionSeconds: String(next?.settings?.adminSessionSeconds || 43200),
       hostname: next?.settings?.hostname || '',
       rootShareName: next?.settings?.rootShareName || 'timemachine',
       smbPublicPort: String(next?.settings?.smbPublicPort || 445),
       smbEnabled: next?.settings?.smbEnabled !== false,
       sftpEnabled: next?.settings?.sftpEnabled !== false,
-      mountManagementEnabled: next?.settings?.mountManagementEnabled !== false
+      mountManagementEnabled: next?.settings?.mountManagementEnabled !== false,
+      smbStreamsBackend: next?.settings?.smbStreamsBackend || 'xattr',
+      mountPollSeconds: String(next?.settings?.mountPollSeconds || 30),
+      vpsCacheDir: next?.settings?.vpsCacheDir || '/data/vps/rclone-vfs-cache',
+      vpsCacheEnabled: next?.settings?.vpsCacheEnabled !== false,
+      vpsWriteBackSeconds: String(next?.settings?.vpsWriteBackSeconds || 120),
+      vpsCacheMaxSizeGb: String(next?.settings?.vpsCacheMaxSizeGb || 1),
+      vpsCacheMaxAgeHours: String(next?.settings?.vpsCacheMaxAgeHours || 24),
+      vpsReadAheadMb: String(next?.settings?.vpsReadAheadMb || 16),
+      enterpriseFeaturesEnabled: next?.settings?.enterpriseFeaturesEnabled === true,
+      adminAuthMode: next?.settings?.adminAuthMode || 'local',
+      smbAuthMode: next?.settings?.smbAuthMode || 'local',
+      sftpAuthMode: next?.settings?.sftpAuthMode || 'local',
+      securityIpAllowlist: next?.settings?.securityIpAllowlist || '',
+      securityBreakGlassEnabled: next?.settings?.securityBreakGlassEnabled !== false,
+      securityAuditRetentionDays: String(next?.settings?.securityAuditRetentionDays || 180),
+      oidcIssuer: next?.settings?.oidcIssuer || '',
+      oidcClientId: next?.settings?.oidcClientId || '',
+      oidcClientSecret: next?.settings?.oidcClientSecret || '',
+      oidcScopes: next?.settings?.oidcScopes || 'openid profile email groups',
+      oidcAdminGroup: next?.settings?.oidcAdminGroup || '',
+      oidcReadOnlyGroup: next?.settings?.oidcReadOnlyGroup || '',
+      directoryDomain: next?.settings?.directoryDomain || '',
+      directoryRealm: next?.settings?.directoryRealm || '',
+      directoryUrl: next?.settings?.directoryUrl || '',
+      directoryBindDn: next?.settings?.directoryBindDn || '',
+      directoryBindPassword: next?.settings?.directoryBindPassword || '',
+      workgroupMappingsJson: next?.settings?.workgroupMappingsJson || '[]',
+      mountPolicyMode: next?.settings?.mountPolicyMode || 'policy_templates',
+      postgresEnabled: next?.settings?.postgresEnabled !== false,
+      postgresHost: next?.settings?.postgresHost || 'postgres',
+      postgresPort: String(next?.settings?.postgresPort || 5432),
+      postgresDatabase: next?.settings?.postgresDatabase || 'tm_adapter',
+      postgresUser: next?.settings?.postgresUser || 'tm_adapter',
+      postgresPassword: next?.settings?.postgresPassword || '',
+      postgresSslMode: next?.settings?.postgresSslMode || 'disable'
     });
     setSetupForm((prev) => ({
       adminUsername: prev.adminUsername || currentUser || 'admin',
       adminPassword: '',
+      apiToken: '',
+      adminSessionSeconds: String(next?.settings?.adminSessionSeconds || 43200),
+      vpsCacheDir: next?.settings?.vpsCacheDir || '/data/vps/rclone-vfs-cache',
       hostname: next?.settings?.hostname || '',
       rootShareName: next?.settings?.rootShareName || 'timemachine',
-      smbPublicPort: String(next?.settings?.smbPublicPort || 445)
+      smbPublicPort: String(next?.settings?.smbPublicPort || 445),
+      smbStreamsBackend: next?.settings?.smbStreamsBackend || 'xattr',
+      mountPollSeconds: String(next?.settings?.mountPollSeconds || 30),
+      enterpriseFeaturesEnabled: next?.settings?.enterpriseFeaturesEnabled === true,
+      adminAuthMode: next?.settings?.adminAuthMode || 'local',
+      smbAuthMode: next?.settings?.smbAuthMode || 'local',
+      sftpAuthMode: next?.settings?.sftpAuthMode || 'local',
+      securityIpAllowlist: next?.settings?.securityIpAllowlist || '',
+      securityBreakGlassEnabled: next?.settings?.securityBreakGlassEnabled !== false,
+      securityAuditRetentionDays: String(next?.settings?.securityAuditRetentionDays || 180),
+      oidcIssuer: next?.settings?.oidcIssuer || '',
+      oidcClientId: next?.settings?.oidcClientId || '',
+      oidcClientSecret: next?.settings?.oidcClientSecret || '',
+      oidcScopes: next?.settings?.oidcScopes || 'openid profile email groups',
+      oidcAdminGroup: next?.settings?.oidcAdminGroup || '',
+      oidcReadOnlyGroup: next?.settings?.oidcReadOnlyGroup || '',
+      directoryDomain: next?.settings?.directoryDomain || '',
+      directoryRealm: next?.settings?.directoryRealm || '',
+      directoryUrl: next?.settings?.directoryUrl || '',
+      directoryBindDn: next?.settings?.directoryBindDn || '',
+      directoryBindPassword: next?.settings?.directoryBindPassword || '',
+      workgroupMappingsJson: next?.settings?.workgroupMappingsJson || '[]',
+      mountPolicyMode: next?.settings?.mountPolicyMode || 'policy_templates',
+      postgresEnabled: next?.settings?.postgresEnabled !== false,
+      postgresHost: next?.settings?.postgresHost || 'postgres',
+      postgresPort: String(next?.settings?.postgresPort || 5432),
+      postgresDatabase: next?.settings?.postgresDatabase || 'tm_adapter',
+      postgresUser: next?.settings?.postgresUser || 'tm_adapter',
+      postgresPassword: next?.settings?.postgresPassword || '',
+      postgresSslMode: next?.settings?.postgresSslMode || 'disable'
     }));
   };
 
@@ -776,6 +943,32 @@ export default function DashboardPage() {
     node.scrollTop = node.scrollHeight;
   }, [activeTab, terminalOutput]);
 
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('tm-theme');
+      if (saved === 'light' || saved === 'dark' || saved === 'system') {
+        setTheme(saved);
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    const apply = (t) => {
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const wantsDark = t === 'dark' || (t === 'system' && prefersDark);
+      document.documentElement.classList.toggle('dark', wantsDark);
+    };
+
+    apply(theme);
+    try { localStorage.setItem('tm-theme', theme); } catch { /* ignore */ }
+
+    if (theme !== 'system') return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => apply('system');
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [theme]);
+
   const handleTerminalSubmit = async (event) => {
     event.preventDefault();
     if (!terminalInput.trim()) {
@@ -838,19 +1031,51 @@ export default function DashboardPage() {
     await runAction('Setup complete! Your server is ready.', async () => {
       await api('/admin/api/setup', {
         method: 'POST',
-        body: JSON.stringify({
+        body: JSON.stringify(stripLockedSettingsFromPayload({
           adminUsername: setupForm.adminUsername || undefined,
           adminPassword: setupForm.adminPassword || undefined,
+          apiToken: setupForm.apiToken.trim() || undefined,
+          adminSessionSeconds: Number(setupForm.adminSessionSeconds || 43200),
+          vpsCacheDir: setupForm.vpsCacheDir,
           hostname: setupForm.hostname,
           rootShareName: setupForm.rootShareName,
           smbPublicPort: Number(setupForm.smbPublicPort || 445),
+          smbStreamsBackend: setupForm.smbStreamsBackend,
+          mountPollSeconds: Number(setupForm.mountPollSeconds || 30),
+          enterpriseFeaturesEnabled: setupForm.enterpriseFeaturesEnabled,
+          adminAuthMode: setupForm.adminAuthMode,
+          smbAuthMode: setupForm.smbAuthMode,
+          sftpAuthMode: setupForm.sftpAuthMode,
+          securityIpAllowlist: setupForm.securityIpAllowlist,
+          securityBreakGlassEnabled: setupForm.securityBreakGlassEnabled,
+          securityAuditRetentionDays: Number(setupForm.securityAuditRetentionDays || 180),
+          oidcIssuer: setupForm.oidcIssuer,
+          oidcClientId: setupForm.oidcClientId,
+          oidcClientSecret: setupForm.oidcClientSecret,
+          oidcScopes: setupForm.oidcScopes,
+          oidcAdminGroup: setupForm.oidcAdminGroup,
+          oidcReadOnlyGroup: setupForm.oidcReadOnlyGroup,
+          directoryDomain: setupForm.directoryDomain,
+          directoryRealm: setupForm.directoryRealm,
+          directoryUrl: setupForm.directoryUrl,
+          directoryBindDn: setupForm.directoryBindDn,
+          directoryBindPassword: setupForm.directoryBindPassword,
+          workgroupMappingsJson: setupForm.workgroupMappingsJson,
+          mountPolicyMode: setupForm.mountPolicyMode,
+          postgresEnabled: setupForm.postgresEnabled,
+          postgresHost: setupForm.postgresHost,
+          postgresPort: Number(setupForm.postgresPort || 5432),
+          postgresDatabase: setupForm.postgresDatabase,
+          postgresUser: setupForm.postgresUser,
+          postgresPassword: setupForm.postgresPassword,
+          postgresSslMode: setupForm.postgresSslMode,
           applySamba: true,
           markSetupComplete: true
-        })
+        }))
       });
 
       await refreshState();
-      setSetupForm((prev) => ({ ...prev, adminPassword: '' }));
+      setSetupForm((prev) => ({ ...prev, adminPassword: '', apiToken: '' }));
     });
   };
 
@@ -873,17 +1098,57 @@ export default function DashboardPage() {
     await runAction('Settings saved successfully.', async () => {
       await api('/admin/api/settings', {
         method: 'PUT',
-        body: JSON.stringify({
+        body: JSON.stringify(stripLockedSettingsFromPayload({
+          adminUsername: settingsForm.adminUsername.trim() || undefined,
+          adminPassword: settingsForm.adminPassword || undefined,
+          apiToken: settingsForm.apiToken.trim() || undefined,
+          adminSessionSeconds: Number(settingsForm.adminSessionSeconds || 43200),
           hostname: settingsForm.hostname,
           rootShareName: settingsForm.rootShareName,
           smbPublicPort: Number(settingsForm.smbPublicPort || 445),
           smbEnabled: settingsForm.smbEnabled,
           sftpEnabled: settingsForm.sftpEnabled,
           mountManagementEnabled: settingsForm.mountManagementEnabled,
+          smbStreamsBackend: settingsForm.smbStreamsBackend,
+          mountPollSeconds: Number(settingsForm.mountPollSeconds || 30),
+          vpsCacheDir: settingsForm.vpsCacheDir,
+          vpsCacheEnabled: settingsForm.vpsCacheEnabled,
+          vpsWriteBackSeconds: Number(settingsForm.vpsWriteBackSeconds || 120),
+          vpsCacheMaxSizeGb: Number(settingsForm.vpsCacheMaxSizeGb || 1),
+          vpsCacheMaxAgeHours: Number(settingsForm.vpsCacheMaxAgeHours || 24),
+          vpsReadAheadMb: Number(settingsForm.vpsReadAheadMb || 16),
+          enterpriseFeaturesEnabled: settingsForm.enterpriseFeaturesEnabled,
+          adminAuthMode: settingsForm.adminAuthMode,
+          smbAuthMode: settingsForm.smbAuthMode,
+          sftpAuthMode: settingsForm.sftpAuthMode,
+          securityIpAllowlist: settingsForm.securityIpAllowlist,
+          securityBreakGlassEnabled: settingsForm.securityBreakGlassEnabled,
+          securityAuditRetentionDays: Number(settingsForm.securityAuditRetentionDays || 180),
+          oidcIssuer: settingsForm.oidcIssuer,
+          oidcClientId: settingsForm.oidcClientId,
+          oidcClientSecret: settingsForm.oidcClientSecret,
+          oidcScopes: settingsForm.oidcScopes,
+          oidcAdminGroup: settingsForm.oidcAdminGroup,
+          oidcReadOnlyGroup: settingsForm.oidcReadOnlyGroup,
+          directoryDomain: settingsForm.directoryDomain,
+          directoryRealm: settingsForm.directoryRealm,
+          directoryUrl: settingsForm.directoryUrl,
+          directoryBindDn: settingsForm.directoryBindDn,
+          directoryBindPassword: settingsForm.directoryBindPassword,
+          workgroupMappingsJson: settingsForm.workgroupMappingsJson,
+          mountPolicyMode: settingsForm.mountPolicyMode,
+          postgresEnabled: settingsForm.postgresEnabled,
+          postgresHost: settingsForm.postgresHost,
+          postgresPort: Number(settingsForm.postgresPort || 5432),
+          postgresDatabase: settingsForm.postgresDatabase,
+          postgresUser: settingsForm.postgresUser,
+          postgresPassword: settingsForm.postgresPassword,
+          postgresSslMode: settingsForm.postgresSslMode,
           applySamba: settingsForm.smbEnabled
-        })
+        }))
       });
       await refreshState();
+      setSettingsForm((prev) => ({ ...prev, adminPassword: '', apiToken: '' }));
     });
   };
 
@@ -1330,6 +1595,12 @@ export default function DashboardPage() {
         </nav>
 
         <div className="sidebar-footer">
+          <div className="theme-toggle">
+            <span className="theme-toggle-label">Theme</span>
+            <button className={`theme-btn ${theme === 'light' ? 'active' : ''}`} onClick={() => setTheme('light')} title="Light mode">☀️</button>
+            <button className={`theme-btn ${theme === 'system' ? 'active' : ''}`} onClick={() => setTheme('system')} title="System">⚙</button>
+            <button className={`theme-btn ${theme === 'dark' ? 'active' : ''}`} onClick={() => setTheme('dark')} title="Dark mode">🌙</button>
+          </div>
           <button className="nav-item" onClick={handleLogout} disabled={submitting}>
             <span className="icon"><Icon name="logout" /></span>
             <span>Sign out</span>
@@ -1386,6 +1657,40 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="form-group">
+                  <label htmlFor="setup-api-token">API Token</label>
+                  <input
+                    id="setup-api-token"
+                    type="password"
+                    value={setupForm.apiToken}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, apiToken: e.target.value }))}
+                    placeholder="Leave blank to keep current"
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="setup-admin-session">Admin Session Seconds</label>
+                  <input
+                    id="setup-admin-session"
+                    type="number"
+                    min="60"
+                    max="2592000"
+                    value={setupForm.adminSessionSeconds}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, adminSessionSeconds: e.target.value }))}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="setup-cache-dir">VPS Cache Directory</label>
+                  <input
+                    id="setup-cache-dir"
+                    type="text"
+                    value={setupForm.vpsCacheDir}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, vpsCacheDir: e.target.value }))}
+                    placeholder="/data/vps/rclone-vfs-cache"
+                  />
+                </div>
+
+                <div className="form-group">
                   <label htmlFor="setup-hostname">Hostname or IP</label>
                   <input
                     id="setup-hostname"
@@ -1419,7 +1724,366 @@ export default function DashboardPage() {
                     required
                   />
                 </div>
+
+                <div className="form-group">
+                  <label htmlFor="setup-streams-backend">SMB Streams Backend</label>
+                  <select
+                    id="setup-streams-backend"
+                    value={setupForm.smbStreamsBackend}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, smbStreamsBackend: e.target.value }))}
+                  >
+                    <option value="xattr">xattr (default)</option>
+                    <option value="depot">depot (compatibility)</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="setup-mount-poll">Mount Poll Interval (seconds)</label>
+                  <input
+                    id="setup-mount-poll"
+                    type="number"
+                    min="10"
+                    max="86400"
+                    value={setupForm.mountPollSeconds}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, mountPollSeconds: e.target.value }))}
+                  />
+                </div>
               </div>
+
+              <div className="row" style={{ marginTop: 16, gap: 24 }}>
+                <label className="checkbox-group" htmlFor="setup-enterprise-enabled">
+                  <input
+                    id="setup-enterprise-enabled"
+                    type="checkbox"
+                    checked={setupForm.enterpriseFeaturesEnabled}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, enterpriseFeaturesEnabled: e.target.checked }))}
+                    disabled={isSettingLocked('enterpriseFeaturesEnabled')}
+                  />
+                  <span>
+                    Enable enterprise setup ({settingSourceLabel('enterpriseFeaturesEnabled')}
+                    {isSettingLocked('enterpriseFeaturesEnabled') ? ', locked' : ''})
+                  </span>
+                </label>
+              </div>
+
+              {setupForm.enterpriseFeaturesEnabled && (
+                <div className="card" style={{ marginTop: 16 }}>
+                  <div className="card-header">
+                    <h3>Enterprise Setup (Optional)</h3>
+                  </div>
+                  <div className="form-grid">
+                    <div className="form-group">
+                      <label htmlFor="setup-admin-auth-mode">Admin Auth Mode ({settingSourceLabel('adminAuthMode')}{isSettingLocked('adminAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="setup-admin-auth-mode"
+                        value={setupForm.adminAuthMode}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, adminAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('adminAuthMode')}
+                      >
+                        <option value="local">Local username/password</option>
+                        <option value="oidc">OIDC SSO</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-smb-auth-mode">SMB Auth Mode ({settingSourceLabel('smbAuthMode')}{isSettingLocked('smbAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="setup-smb-auth-mode"
+                        value={setupForm.smbAuthMode}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, smbAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('smbAuthMode')}
+                      >
+                        <option value="local">Local credentials</option>
+                        <option value="enterprise">Enterprise auth</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-sftp-auth-mode">SFTP Auth Mode ({settingSourceLabel('sftpAuthMode')}{isSettingLocked('sftpAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="setup-sftp-auth-mode"
+                        value={setupForm.sftpAuthMode}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, sftpAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('sftpAuthMode')}
+                      >
+                        <option value="local">Local credentials</option>
+                        <option value="enterprise">Enterprise auth</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-security-allowlist">Security IP Allowlist ({settingSourceLabel('securityIpAllowlist')}{isSettingLocked('securityIpAllowlist') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-security-allowlist"
+                        type="text"
+                        value={setupForm.securityIpAllowlist}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, securityIpAllowlist: e.target.value }))}
+                        placeholder="10.0.0.0/8,192.168.0.0/16"
+                        disabled={isSettingLocked('securityIpAllowlist')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-security-retention">Audit Retention Days ({settingSourceLabel('securityAuditRetentionDays')}{isSettingLocked('securityAuditRetentionDays') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-security-retention"
+                        type="number"
+                        min="1"
+                        max="3650"
+                        value={setupForm.securityAuditRetentionDays}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, securityAuditRetentionDays: e.target.value }))}
+                        disabled={isSettingLocked('securityAuditRetentionDays')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-issuer">OIDC Issuer ({settingSourceLabel('oidcIssuer')}{isSettingLocked('oidcIssuer') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-issuer"
+                        type="text"
+                        value={setupForm.oidcIssuer}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcIssuer: e.target.value }))}
+                        placeholder="https://idp.example.com"
+                        disabled={isSettingLocked('oidcIssuer')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-client-id">OIDC Client ID ({settingSourceLabel('oidcClientId')}{isSettingLocked('oidcClientId') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-client-id"
+                        type="text"
+                        value={setupForm.oidcClientId}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcClientId: e.target.value }))}
+                        disabled={isSettingLocked('oidcClientId')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-client-secret">OIDC Client Secret ({settingSourceLabel('oidcClientSecret')}{isSettingLocked('oidcClientSecret') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-client-secret"
+                        type="password"
+                        value={setupForm.oidcClientSecret}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcClientSecret: e.target.value }))}
+                        disabled={isSettingLocked('oidcClientSecret')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-scopes">OIDC Scopes ({settingSourceLabel('oidcScopes')}{isSettingLocked('oidcScopes') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-scopes"
+                        type="text"
+                        value={setupForm.oidcScopes}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcScopes: e.target.value }))}
+                        disabled={isSettingLocked('oidcScopes')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-admin-group">OIDC Admin Group ({settingSourceLabel('oidcAdminGroup')}{isSettingLocked('oidcAdminGroup') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-admin-group"
+                        type="text"
+                        value={setupForm.oidcAdminGroup}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcAdminGroup: e.target.value }))}
+                        disabled={isSettingLocked('oidcAdminGroup')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-oidc-readonly-group">OIDC Read-only Group ({settingSourceLabel('oidcReadOnlyGroup')}{isSettingLocked('oidcReadOnlyGroup') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-oidc-readonly-group"
+                        type="text"
+                        value={setupForm.oidcReadOnlyGroup}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, oidcReadOnlyGroup: e.target.value }))}
+                        disabled={isSettingLocked('oidcReadOnlyGroup')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-directory-url">Directory URL ({settingSourceLabel('directoryUrl')}{isSettingLocked('directoryUrl') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-directory-url"
+                        type="text"
+                        value={setupForm.directoryUrl}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, directoryUrl: e.target.value }))}
+                        placeholder="ldaps://dc.example.com"
+                        disabled={isSettingLocked('directoryUrl')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-directory-domain">Directory Domain ({settingSourceLabel('directoryDomain')}{isSettingLocked('directoryDomain') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-directory-domain"
+                        type="text"
+                        value={setupForm.directoryDomain}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, directoryDomain: e.target.value }))}
+                        placeholder="corp.example.com"
+                        disabled={isSettingLocked('directoryDomain')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-directory-realm">Directory Realm ({settingSourceLabel('directoryRealm')}{isSettingLocked('directoryRealm') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-directory-realm"
+                        type="text"
+                        value={setupForm.directoryRealm}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, directoryRealm: e.target.value }))}
+                        placeholder="CORP.EXAMPLE.COM"
+                        disabled={isSettingLocked('directoryRealm')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-directory-bind-dn">Directory Bind DN ({settingSourceLabel('directoryBindDn')}{isSettingLocked('directoryBindDn') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-directory-bind-dn"
+                        type="text"
+                        value={setupForm.directoryBindDn}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, directoryBindDn: e.target.value }))}
+                        disabled={isSettingLocked('directoryBindDn')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-directory-bind-password">Directory Bind Password ({settingSourceLabel('directoryBindPassword')}{isSettingLocked('directoryBindPassword') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-directory-bind-password"
+                        type="password"
+                        value={setupForm.directoryBindPassword}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, directoryBindPassword: e.target.value }))}
+                        disabled={isSettingLocked('directoryBindPassword')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-workgroups-json">Workgroup Mappings JSON ({settingSourceLabel('workgroupMappingsJson')}{isSettingLocked('workgroupMappingsJson') ? ', locked' : ''})</label>
+                      <textarea
+                        id="setup-workgroups-json"
+                        value={setupForm.workgroupMappingsJson}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, workgroupMappingsJson: e.target.value }))}
+                        rows={3}
+                        disabled={isSettingLocked('workgroupMappingsJson')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-mount-policy-mode">Mount Policy Mode ({settingSourceLabel('mountPolicyMode')}{isSettingLocked('mountPolicyMode') ? ', locked' : ''})</label>
+                      <select
+                        id="setup-mount-policy-mode"
+                        value={setupForm.mountPolicyMode}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, mountPolicyMode: e.target.value }))}
+                        disabled={isSettingLocked('mountPolicyMode')}
+                      >
+                        <option value="policy_templates">Policy templates + guarded overrides</option>
+                        <option value="global_defaults">Single global defaults</option>
+                        <option value="guidelines">Guidelines only</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-host">Postgres Host ({settingSourceLabel('postgresHost')}{isSettingLocked('postgresHost') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-postgres-host"
+                        type="text"
+                        value={setupForm.postgresHost}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresHost: e.target.value }))}
+                        disabled={isSettingLocked('postgresHost') || !setupForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-port">Postgres Port ({settingSourceLabel('postgresPort')}{isSettingLocked('postgresPort') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-postgres-port"
+                        type="number"
+                        min="1"
+                        max="65535"
+                        value={setupForm.postgresPort}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresPort: e.target.value }))}
+                        disabled={isSettingLocked('postgresPort') || !setupForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-db">Postgres Database ({settingSourceLabel('postgresDatabase')}{isSettingLocked('postgresDatabase') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-postgres-db"
+                        type="text"
+                        value={setupForm.postgresDatabase}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresDatabase: e.target.value }))}
+                        disabled={isSettingLocked('postgresDatabase') || !setupForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-user">Postgres User ({settingSourceLabel('postgresUser')}{isSettingLocked('postgresUser') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-postgres-user"
+                        type="text"
+                        value={setupForm.postgresUser}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresUser: e.target.value }))}
+                        disabled={isSettingLocked('postgresUser') || !setupForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-password">Postgres Password ({settingSourceLabel('postgresPassword')}{isSettingLocked('postgresPassword') ? ', locked' : ''})</label>
+                      <input
+                        id="setup-postgres-password"
+                        type="password"
+                        value={setupForm.postgresPassword}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresPassword: e.target.value }))}
+                        disabled={isSettingLocked('postgresPassword') || !setupForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="setup-postgres-ssl-mode">Postgres SSL Mode ({settingSourceLabel('postgresSslMode')}{isSettingLocked('postgresSslMode') ? ', locked' : ''})</label>
+                      <select
+                        id="setup-postgres-ssl-mode"
+                        value={setupForm.postgresSslMode}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresSslMode: e.target.value }))}
+                        disabled={isSettingLocked('postgresSslMode') || !setupForm.postgresEnabled}
+                      >
+                        <option value="disable">disable</option>
+                        <option value="require">require</option>
+                        <option value="verify-ca">verify-ca</option>
+                        <option value="verify-full">verify-full</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="row" style={{ marginTop: 12, gap: 24 }}>
+                    <label className="checkbox-group" htmlFor="setup-security-breakglass">
+                      <input
+                        id="setup-security-breakglass"
+                        type="checkbox"
+                        checked={setupForm.securityBreakGlassEnabled}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, securityBreakGlassEnabled: e.target.checked }))}
+                        disabled={isSettingLocked('securityBreakGlassEnabled')}
+                      />
+                      <span>Enable local break-glass login ({settingSourceLabel('securityBreakGlassEnabled')}{isSettingLocked('securityBreakGlassEnabled') ? ', locked' : ''})</span>
+                    </label>
+
+                    <label className="checkbox-group" htmlFor="setup-postgres-enabled">
+                      <input
+                        id="setup-postgres-enabled"
+                        type="checkbox"
+                        checked={setupForm.postgresEnabled}
+                        onChange={(e) => setSetupForm((prev) => ({ ...prev, postgresEnabled: e.target.checked }))}
+                        disabled
+                      />
+                      <span>Postgres-backed config storage is required ({settingSourceLabel('postgresEnabled')})</span>
+                    </label>
+                  </div>
+                </div>
+              )}
 
               <div className="row" style={{ marginTop: 20 }}>
                 <button className="btn primary" type="submit" disabled={submitting}>
@@ -2539,6 +3203,27 @@ export default function DashboardPage() {
               <p>Configure your TM Adapter server</p>
             </div>
 
+            <div className="appearance-card">
+              <div className="card-header" style={{ marginBottom: 0 }}>
+                <h3>✨ Appearance</h3>
+              </div>
+              <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--text-secondary)' }}>Choose your preferred color scheme</p>
+              <div className="appearance-options">
+                <button className={`appearance-option ${theme === 'light' ? 'active' : ''}`} onClick={() => setTheme('light')} type="button">
+                  <span className="ao-icon">☀️</span>
+                  Light
+                </button>
+                <button className={`appearance-option ${theme === 'system' ? 'active' : ''}`} onClick={() => setTheme('system')} type="button">
+                  <span className="ao-icon">💻</span>
+                  System
+                </button>
+                <button className={`appearance-option ${theme === 'dark' ? 'active' : ''}`} onClick={() => setTheme('dark')} type="button">
+                  <span className="ao-icon">🌙</span>
+                  Dark
+                </button>
+              </div>
+            </div>
+
             <div className="card" style={{ marginBottom: 20 }}>
               <div className="card-header">
                 <h3><Icon name="server" /> Server Configuration</h3>
@@ -2546,6 +3231,52 @@ export default function DashboardPage() {
 
               <form onSubmit={handleSettingsSave}>
                 <div className="form-grid">
+                  <div className="form-group">
+                    <label htmlFor="settings-admin-username">Admin Username</label>
+                    <input
+                      id="settings-admin-username"
+                      type="text"
+                      value={settingsForm.adminUsername}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, adminUsername: e.target.value }))}
+                      placeholder="admin"
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-admin-password">Admin Password</label>
+                    <input
+                      id="settings-admin-password"
+                      type="password"
+                      value={settingsForm.adminPassword}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, adminPassword: e.target.value }))}
+                      placeholder="Leave blank to keep current"
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-api-token">API Token</label>
+                    <input
+                      id="settings-api-token"
+                      type="password"
+                      value={settingsForm.apiToken}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, apiToken: e.target.value }))}
+                      placeholder={dashboard?.settings?.apiTokenConfigured ? 'Leave blank to keep current' : 'Required for /api/*'}
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-admin-session">Admin Session Seconds</label>
+                    <input
+                      id="settings-admin-session"
+                      type="number"
+                      min="60"
+                      max="2592000"
+                      value={settingsForm.adminSessionSeconds}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, adminSessionSeconds: e.target.value }))}
+                      required
+                    />
+                  </div>
+
                   <div className="form-group">
                     <label htmlFor="settings-hostname">Hostname or IP</label>
                     <input
@@ -2577,6 +3308,95 @@ export default function DashboardPage() {
                       max="65535"
                       value={settingsForm.smbPublicPort}
                       onChange={(e) => setSettingsForm((prev) => ({ ...prev, smbPublicPort: e.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-cache-dir">VPS Cache Directory</label>
+                    <input
+                      id="settings-cache-dir"
+                      type="text"
+                      value={settingsForm.vpsCacheDir}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsCacheDir: e.target.value }))}
+                      placeholder="/data/vps/rclone-vfs-cache"
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-streams-backend">SMB Streams Backend</label>
+                    <select
+                      id="settings-streams-backend"
+                      value={settingsForm.smbStreamsBackend}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, smbStreamsBackend: e.target.value }))}
+                    >
+                      <option value="xattr">xattr (default)</option>
+                      <option value="depot">depot (compatibility)</option>
+                    </select>
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-mount-poll">Mount Poll Interval (seconds)</label>
+                    <input
+                      id="settings-mount-poll"
+                      type="number"
+                      min="10"
+                      max="86400"
+                      value={settingsForm.mountPollSeconds}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, mountPollSeconds: e.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-cache-writeback">Write-Back Delay (seconds)</label>
+                    <input
+                      id="settings-cache-writeback"
+                      type="number"
+                      min="5"
+                      max="86400"
+                      value={settingsForm.vpsWriteBackSeconds}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsWriteBackSeconds: e.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-cache-max-gb">Cache Max Size (GB)</label>
+                    <input
+                      id="settings-cache-max-gb"
+                      type="number"
+                      min="1"
+                      max="10240"
+                      value={settingsForm.vpsCacheMaxSizeGb}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsCacheMaxSizeGb: e.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-cache-max-age">Cache Max Age (hours)</label>
+                    <input
+                      id="settings-cache-max-age"
+                      type="number"
+                      min="1"
+                      max="720"
+                      value={settingsForm.vpsCacheMaxAgeHours}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsCacheMaxAgeHours: e.target.value }))}
+                      required
+                    />
+                  </div>
+
+                  <div className="form-group">
+                    <label htmlFor="settings-read-ahead">Read Buffer (MB)</label>
+                    <input
+                      id="settings-read-ahead"
+                      type="number"
+                      min="1"
+                      max="2048"
+                      value={settingsForm.vpsReadAheadMb}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsReadAheadMb: e.target.value }))}
                       required
                     />
                   </div>
@@ -2612,6 +3432,350 @@ export default function DashboardPage() {
                     />
                     <span>Enable mount manager</span>
                   </label>
+
+                  <label className="checkbox-group" htmlFor="settings-vps-cache-enabled">
+                    <input
+                      id="settings-vps-cache-enabled"
+                      type="checkbox"
+                      checked={settingsForm.vpsCacheEnabled}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, vpsCacheEnabled: e.target.checked }))}
+                    />
+                    <span>Enable VPS read/write cache for cloud mounts</span>
+                  </label>
+                </div>
+
+                <div className="card" style={{ marginTop: 16 }}>
+                  <div className="card-header">
+                    <h3>Enterprise Auth and Security (UI + Env)</h3>
+                  </div>
+
+                  <div className="row" style={{ marginBottom: 12, gap: 24 }}>
+                    <label className="checkbox-group" htmlFor="settings-enterprise-enabled">
+                      <input
+                        id="settings-enterprise-enabled"
+                        type="checkbox"
+                        checked={settingsForm.enterpriseFeaturesEnabled}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, enterpriseFeaturesEnabled: e.target.checked }))}
+                        disabled={isSettingLocked('enterpriseFeaturesEnabled')}
+                      />
+                      <span>
+                        Enterprise features ({settingSourceLabel('enterpriseFeaturesEnabled')}
+                        {isSettingLocked('enterpriseFeaturesEnabled') ? ', locked' : ''})
+                      </span>
+                    </label>
+
+                    <label className="checkbox-group" htmlFor="settings-security-breakglass">
+                      <input
+                        id="settings-security-breakglass"
+                        type="checkbox"
+                        checked={settingsForm.securityBreakGlassEnabled}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, securityBreakGlassEnabled: e.target.checked }))}
+                        disabled={isSettingLocked('securityBreakGlassEnabled')}
+                      />
+                      <span>
+                        Break-glass local login ({settingSourceLabel('securityBreakGlassEnabled')}
+                        {isSettingLocked('securityBreakGlassEnabled') ? ', locked' : ''})
+                      </span>
+                    </label>
+
+                    <label className="checkbox-group" htmlFor="settings-postgres-enabled">
+                      <input
+                        id="settings-postgres-enabled"
+                        type="checkbox"
+                        checked={settingsForm.postgresEnabled}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresEnabled: e.target.checked }))}
+                        disabled
+                      />
+                      <span>
+                        Postgres-backed config storage is required ({settingSourceLabel('postgresEnabled')})
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className="form-grid">
+                    <div className="form-group">
+                      <label htmlFor="settings-admin-auth-mode">Admin Auth Mode ({settingSourceLabel('adminAuthMode')}{isSettingLocked('adminAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="settings-admin-auth-mode"
+                        value={settingsForm.adminAuthMode}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, adminAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('adminAuthMode')}
+                      >
+                        <option value="local">Local username/password</option>
+                        <option value="oidc">OIDC SSO</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-smb-auth-mode">SMB Auth Mode ({settingSourceLabel('smbAuthMode')}{isSettingLocked('smbAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="settings-smb-auth-mode"
+                        value={settingsForm.smbAuthMode}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, smbAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('smbAuthMode')}
+                      >
+                        <option value="local">Local credentials</option>
+                        <option value="enterprise">Enterprise auth</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-sftp-auth-mode">SFTP Auth Mode ({settingSourceLabel('sftpAuthMode')}{isSettingLocked('sftpAuthMode') ? ', locked' : ''})</label>
+                      <select
+                        id="settings-sftp-auth-mode"
+                        value={settingsForm.sftpAuthMode}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, sftpAuthMode: e.target.value }))}
+                        disabled={isSettingLocked('sftpAuthMode')}
+                      >
+                        <option value="local">Local credentials</option>
+                        <option value="enterprise">Enterprise auth</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-security-allowlist">Security IP Allowlist ({settingSourceLabel('securityIpAllowlist')}{isSettingLocked('securityIpAllowlist') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-security-allowlist"
+                        type="text"
+                        value={settingsForm.securityIpAllowlist}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, securityIpAllowlist: e.target.value }))}
+                        placeholder="10.0.0.0/8,192.168.0.0/16"
+                        disabled={isSettingLocked('securityIpAllowlist')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-security-retention">Audit Retention Days ({settingSourceLabel('securityAuditRetentionDays')}{isSettingLocked('securityAuditRetentionDays') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-security-retention"
+                        type="number"
+                        min="1"
+                        max="3650"
+                        value={settingsForm.securityAuditRetentionDays}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, securityAuditRetentionDays: e.target.value }))}
+                        disabled={isSettingLocked('securityAuditRetentionDays')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-issuer">OIDC Issuer ({settingSourceLabel('oidcIssuer')}{isSettingLocked('oidcIssuer') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-issuer"
+                        type="text"
+                        value={settingsForm.oidcIssuer}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcIssuer: e.target.value }))}
+                        placeholder="https://idp.example.com"
+                        disabled={isSettingLocked('oidcIssuer')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-client-id">OIDC Client ID ({settingSourceLabel('oidcClientId')}{isSettingLocked('oidcClientId') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-client-id"
+                        type="text"
+                        value={settingsForm.oidcClientId}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcClientId: e.target.value }))}
+                        disabled={isSettingLocked('oidcClientId')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-client-secret">OIDC Client Secret ({settingSourceLabel('oidcClientSecret')}{isSettingLocked('oidcClientSecret') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-client-secret"
+                        type="password"
+                        value={settingsForm.oidcClientSecret}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcClientSecret: e.target.value }))}
+                        disabled={isSettingLocked('oidcClientSecret')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-scopes">OIDC Scopes ({settingSourceLabel('oidcScopes')}{isSettingLocked('oidcScopes') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-scopes"
+                        type="text"
+                        value={settingsForm.oidcScopes}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcScopes: e.target.value }))}
+                        disabled={isSettingLocked('oidcScopes')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-admin-group">OIDC Admin Group ({settingSourceLabel('oidcAdminGroup')}{isSettingLocked('oidcAdminGroup') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-admin-group"
+                        type="text"
+                        value={settingsForm.oidcAdminGroup}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcAdminGroup: e.target.value }))}
+                        disabled={isSettingLocked('oidcAdminGroup')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-oidc-readonly-group">OIDC Read-only Group ({settingSourceLabel('oidcReadOnlyGroup')}{isSettingLocked('oidcReadOnlyGroup') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-oidc-readonly-group"
+                        type="text"
+                        value={settingsForm.oidcReadOnlyGroup}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, oidcReadOnlyGroup: e.target.value }))}
+                        disabled={isSettingLocked('oidcReadOnlyGroup')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-directory-domain">Directory Domain ({settingSourceLabel('directoryDomain')}{isSettingLocked('directoryDomain') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-directory-domain"
+                        type="text"
+                        value={settingsForm.directoryDomain}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, directoryDomain: e.target.value }))}
+                        disabled={isSettingLocked('directoryDomain')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-directory-realm">Directory Realm ({settingSourceLabel('directoryRealm')}{isSettingLocked('directoryRealm') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-directory-realm"
+                        type="text"
+                        value={settingsForm.directoryRealm}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, directoryRealm: e.target.value }))}
+                        disabled={isSettingLocked('directoryRealm')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-directory-url">Directory URL ({settingSourceLabel('directoryUrl')}{isSettingLocked('directoryUrl') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-directory-url"
+                        type="text"
+                        value={settingsForm.directoryUrl}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, directoryUrl: e.target.value }))}
+                        disabled={isSettingLocked('directoryUrl')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-directory-bind-dn">Directory Bind DN ({settingSourceLabel('directoryBindDn')}{isSettingLocked('directoryBindDn') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-directory-bind-dn"
+                        type="text"
+                        value={settingsForm.directoryBindDn}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, directoryBindDn: e.target.value }))}
+                        disabled={isSettingLocked('directoryBindDn')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-directory-bind-password">Directory Bind Password ({settingSourceLabel('directoryBindPassword')}{isSettingLocked('directoryBindPassword') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-directory-bind-password"
+                        type="password"
+                        value={settingsForm.directoryBindPassword}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, directoryBindPassword: e.target.value }))}
+                        disabled={isSettingLocked('directoryBindPassword')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-workgroups-json">Workgroup Mappings JSON ({settingSourceLabel('workgroupMappingsJson')}{isSettingLocked('workgroupMappingsJson') ? ', locked' : ''})</label>
+                      <textarea
+                        id="settings-workgroups-json"
+                        rows={3}
+                        value={settingsForm.workgroupMappingsJson}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, workgroupMappingsJson: e.target.value }))}
+                        disabled={isSettingLocked('workgroupMappingsJson')}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-mount-policy-mode">Mount Policy Mode ({settingSourceLabel('mountPolicyMode')}{isSettingLocked('mountPolicyMode') ? ', locked' : ''})</label>
+                      <select
+                        id="settings-mount-policy-mode"
+                        value={settingsForm.mountPolicyMode}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, mountPolicyMode: e.target.value }))}
+                        disabled={isSettingLocked('mountPolicyMode')}
+                      >
+                        <option value="policy_templates">Policy templates + guarded overrides</option>
+                        <option value="global_defaults">Single global defaults</option>
+                        <option value="guidelines">Guidelines only</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-host">Postgres Host ({settingSourceLabel('postgresHost')}{isSettingLocked('postgresHost') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-postgres-host"
+                        type="text"
+                        value={settingsForm.postgresHost}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresHost: e.target.value }))}
+                        disabled={isSettingLocked('postgresHost') || !settingsForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-port">Postgres Port ({settingSourceLabel('postgresPort')}{isSettingLocked('postgresPort') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-postgres-port"
+                        type="number"
+                        min="1"
+                        max="65535"
+                        value={settingsForm.postgresPort}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresPort: e.target.value }))}
+                        disabled={isSettingLocked('postgresPort') || !settingsForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-db">Postgres Database ({settingSourceLabel('postgresDatabase')}{isSettingLocked('postgresDatabase') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-postgres-db"
+                        type="text"
+                        value={settingsForm.postgresDatabase}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresDatabase: e.target.value }))}
+                        disabled={isSettingLocked('postgresDatabase') || !settingsForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-user">Postgres User ({settingSourceLabel('postgresUser')}{isSettingLocked('postgresUser') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-postgres-user"
+                        type="text"
+                        value={settingsForm.postgresUser}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresUser: e.target.value }))}
+                        disabled={isSettingLocked('postgresUser') || !settingsForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-password">Postgres Password ({settingSourceLabel('postgresPassword')}{isSettingLocked('postgresPassword') ? ', locked' : ''})</label>
+                      <input
+                        id="settings-postgres-password"
+                        type="password"
+                        value={settingsForm.postgresPassword}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresPassword: e.target.value }))}
+                        disabled={isSettingLocked('postgresPassword') || !settingsForm.postgresEnabled}
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="settings-postgres-ssl-mode">Postgres SSL Mode ({settingSourceLabel('postgresSslMode')}{isSettingLocked('postgresSslMode') ? ', locked' : ''})</label>
+                      <select
+                        id="settings-postgres-ssl-mode"
+                        value={settingsForm.postgresSslMode}
+                        onChange={(e) => setSettingsForm((prev) => ({ ...prev, postgresSslMode: e.target.value }))}
+                        disabled={isSettingLocked('postgresSslMode') || !settingsForm.postgresEnabled}
+                      >
+                        <option value="disable">disable</option>
+                        <option value="require">require</option>
+                        <option value="verify-ca">verify-ca</option>
+                        <option value="verify-full">verify-full</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="form-actions">
@@ -2629,6 +3793,7 @@ export default function DashboardPage() {
                   {dashboard?.samba?.effectiveEnabled ? 'Enabled' : 'Disabled'}
                 </div>
                 <div className="detail">{dashboard?.samba?.confDir || '/etc/samba/smb.conf.d/tm-adapter'}</div>
+                <div className="detail">Streams backend: {dashboard?.settings?.smbStreamsBackend || 'xattr'}</div>
                 {dashboard?.samba?.settingEnabled === false && (
                   <div className="detail">Disabled in dashboard settings</div>
                 )}
@@ -2640,6 +3805,11 @@ export default function DashboardPage() {
                   {dashboard?.mountManager?.effectiveEnabled ? 'Enabled' : 'Disabled'}
                 </div>
                 <div className="detail">Poll interval: {dashboard?.mountManager?.pollSeconds || 30}s</div>
+                <div className="detail">
+                  VPS cache: {dashboard?.settings?.vpsCacheEnabled === false ? 'Disabled' : 'Enabled'} (write-back{' '}
+                  {dashboard?.settings?.vpsWriteBackSeconds || 120}s, max {dashboard?.settings?.vpsCacheMaxSizeGb || 1}GB)
+                </div>
+                <div className="detail">Cache dir: {dashboard?.settings?.vpsCacheDir || '/data/vps/rclone-vfs-cache'}</div>
                 {dashboard?.mountManager?.settingEnabled === false && (
                   <div className="detail">Disabled in dashboard settings</div>
                 )}
@@ -2651,6 +3821,19 @@ export default function DashboardPage() {
                   {dashboard?.sftp?.enabled ? 'Enabled' : 'Disabled'}
                 </div>
                 <div className="detail">{dashboard?.sftp?.url || 'sftp://<server>'}</div>
+              </div>
+
+              <div className="status-card">
+                <h4>Enterprise Config</h4>
+                <div className="value" style={{ color: dashboard?.settings?.enterpriseFeaturesEnabled ? 'var(--success)' : 'var(--muted)' }}>
+                  {dashboard?.settings?.enterpriseFeaturesEnabled ? 'Enabled' : 'Local defaults'}
+                </div>
+                <div className="detail">Admin auth: {dashboard?.settings?.adminAuthMode || 'local'}</div>
+                <div className="detail">SMB auth: {dashboard?.settings?.smbAuthMode || 'local'}</div>
+                <div className="detail">SFTP auth: {dashboard?.settings?.sftpAuthMode || 'local'}</div>
+                <div className="detail">
+                  Postgres: {dashboard?.postgres?.configured ? 'Configured' : (dashboard?.postgres?.required ? 'Missing config' : 'Not required')}
+                </div>
               </div>
             </div>
 

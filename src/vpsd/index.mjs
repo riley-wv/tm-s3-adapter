@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { ensureDir, safeJoin, walkFiles } from '../shared/fsUtils.mjs';
 import { handleError, parseUrl, readJsonBody, sendJson, sendNoContent } from '../shared/http.mjs';
 import { JsonStore } from '../shared/jsonStore.mjs';
+import { PostgresSettingsStore } from '../shared/postgresSettingsStore.mjs';
 import { SambaManager } from './sambaManager.mjs';
 import { CloudMountManager } from './cloudMountManager.mjs';
 
@@ -25,11 +26,88 @@ const sftpPort = Number(process.env.VPS_SFTP_PORT || 2222);
 const sftpUsername = process.env.VPS_SFTP_USERNAME || 'tmbackup';
 const sftpPassword = process.env.VPS_SFTP_PASSWORD || '';
 const sftpRootPath = process.env.VPS_SFTP_ROOT_PATH || '/smb-share';
+const defaultVpsCacheDir = process.env.VPS_RCLONE_CACHE_DIR || join(dataDir, 'rclone-vfs-cache');
 const apiToken = process.env.VPS_API_TOKEN || 'change-me';
 const adminUsername = process.env.VPS_ADMIN_USERNAME || 'admin';
 const adminPassword = process.env.VPS_ADMIN_PASSWORD || 'change-admin-password';
 const adminSessionSeconds = Number(process.env.VPS_ADMIN_SESSION_SECONDS || 43200);
+const mountPollSeconds = Number(process.env.VPS_MOUNT_POLL_SECONDS || 30);
+const sambaStreamsBackend = String(process.env.VPS_SAMBA_STREAMS_BACKEND || 'xattr');
 const cookieName = 'tm_admin_session';
+const defaultVpsCacheSettings = Object.freeze({
+  enabled: true,
+  writeBackSeconds: 120,
+  maxSizeGb: 1,
+  maxAgeHours: 24,
+  readAheadMb: 16
+});
+
+function envFirstString(keys, fallback = '') {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(process.env, key)) {
+      continue;
+    }
+    const value = String(process.env[key] || '').trim();
+    if (value) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function envFirstNumber(keys, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = envFirstString(keys, '');
+  if (!raw) {
+    return fallback;
+  }
+  return parsePositiveInt(raw, fallback, { min, max });
+}
+
+function envFirstSslMode(keys, fallback = 'disable') {
+  const raw = envFirstString(keys, fallback).toLowerCase();
+  if (['disable', 'require', 'verify-ca', 'verify-full'].includes(raw)) {
+    return raw;
+  }
+  return fallback;
+}
+
+const postgresBootstrapConfig = Object.freeze({
+  host: envFirstString(['VPS_POSTGRES_HOST', 'VPS_POSTGRES_HOST_FORCE', 'VPS_POSTGRES_HOST_DEFAULT'], 'postgres'),
+  port: envFirstNumber(['VPS_POSTGRES_PORT', 'VPS_POSTGRES_PORT_FORCE', 'VPS_POSTGRES_PORT_DEFAULT'], 5432, { min: 1, max: 65535 }),
+  database: envFirstString(['VPS_POSTGRES_DATABASE', 'VPS_POSTGRES_DATABASE_FORCE', 'VPS_POSTGRES_DATABASE_DEFAULT'], 'tm_adapter'),
+  user: envFirstString(['VPS_POSTGRES_USER', 'VPS_POSTGRES_USER_FORCE', 'VPS_POSTGRES_USER_DEFAULT'], 'tm_adapter'),
+  password: envFirstString(['VPS_POSTGRES_PASSWORD', 'VPS_POSTGRES_PASSWORD_FORCE', 'VPS_POSTGRES_PASSWORD_DEFAULT'], ''),
+  sslMode: envFirstSslMode(['VPS_POSTGRES_SSL_MODE', 'VPS_POSTGRES_SSL_MODE_FORCE', 'VPS_POSTGRES_SSL_MODE_DEFAULT'], 'disable')
+});
+const defaultDualSourceSettings = Object.freeze({
+  enterpriseFeaturesEnabled: false,
+  adminAuthMode: 'local',
+  smbAuthMode: 'local',
+  sftpAuthMode: 'local',
+  securityIpAllowlist: '',
+  securityBreakGlassEnabled: true,
+  securityAuditRetentionDays: 180,
+  oidcIssuer: '',
+  oidcClientId: '',
+  oidcClientSecret: '',
+  oidcScopes: 'openid profile email groups',
+  oidcAdminGroup: '',
+  oidcReadOnlyGroup: '',
+  directoryDomain: '',
+  directoryRealm: '',
+  directoryUrl: '',
+  directoryBindDn: '',
+  directoryBindPassword: '',
+  workgroupMappingsJson: '[]',
+  mountPolicyMode: 'policy_templates',
+  postgresEnabled: true,
+  postgresHost: 'postgres',
+  postgresPort: 5432,
+  postgresDatabase: 'tm_adapter',
+  postgresUser: 'tm_adapter',
+  postgresPassword: '',
+  postgresSslMode: 'disable'
+});
 
 const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
   version: 3,
@@ -40,9 +118,20 @@ const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
     smbEnabled: true,
     sftpEnabled: true,
     mountManagementEnabled: true,
+    smbStreamsBackend,
+    mountPollSeconds,
+    vpsCacheDir: defaultVpsCacheDir,
+    vpsCacheEnabled: defaultVpsCacheSettings.enabled,
+    vpsWriteBackSeconds: defaultVpsCacheSettings.writeBackSeconds,
+    vpsCacheMaxSizeGb: defaultVpsCacheSettings.maxSizeGb,
+    vpsCacheMaxAgeHours: defaultVpsCacheSettings.maxAgeHours,
+    vpsReadAheadMb: defaultVpsCacheSettings.readAheadMb,
+    apiToken: '',
+    adminSessionSeconds,
     setupCompleted: false,
     adminUsername: '',
-    adminPassword: ''
+    adminPassword: '',
+    ...defaultDualSourceSettings
   },
   cloudMounts: {},
   disks: {}
@@ -51,6 +140,7 @@ const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
 const sambaManager = new SambaManager();
 const mountManager = new CloudMountManager();
 const sessions = new Map();
+const postgresSettingsStore = new PostgresSettingsStore(postgresBootstrapConfig);
 
 const contentTypeByExt = {
   '.html': 'text/html; charset=utf-8',
@@ -123,6 +213,410 @@ function parsePositiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTE
     return max;
   }
   return normalized;
+}
+
+function normalizeSambaStreamsBackend(value) {
+  const normalized = String(value || 'xattr').trim().toLowerCase();
+  if (normalized === 'depot' || normalized === 'streams_depot') {
+    return 'depot';
+  }
+  return 'xattr';
+}
+
+function normalizeBooleanValue(value, fallback = false) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  if (typeof value === 'boolean') {
+    return value;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function normalizeStringValue(value, fallback = '') {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  return String(value).trim();
+}
+
+function normalizeAdminAuthMode(value, fallback = 'local') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'oidc') {
+    return 'oidc';
+  }
+  if (normalized === 'local') {
+    return 'local';
+  }
+  return fallback;
+}
+
+function normalizeProtocolAuthMode(value, fallback = 'local') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'enterprise') {
+    return 'enterprise';
+  }
+  if (normalized === 'local') {
+    return 'local';
+  }
+  return fallback;
+}
+
+function normalizeMountPolicyMode(value, fallback = 'policy_templates') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'global_defaults') {
+    return 'global_defaults';
+  }
+  if (normalized === 'guidelines') {
+    return 'guidelines';
+  }
+  if (normalized === 'policy_templates' || normalized === 'policy_templates_guarded_overrides') {
+    return 'policy_templates';
+  }
+  return fallback;
+}
+
+function normalizePostgresSslMode(value, fallback = 'disable') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['disable', 'require', 'verify-ca', 'verify-full'].includes(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeWorkgroupMappingsJson(value, fallback = '[]') {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return '[]';
+  }
+  try {
+    const parsed = JSON.parse(normalized);
+    if (!Array.isArray(parsed)) {
+      return fallback;
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return fallback;
+  }
+}
+
+function isValidWorkgroupMappingsJson(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(normalized);
+    return Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+const dualSourceSettingSpecs = Object.freeze({
+  enterpriseFeaturesEnabled: {
+    envBase: 'VPS_ENTERPRISE_FEATURES_ENABLED',
+    defaultValue: defaultDualSourceSettings.enterpriseFeaturesEnabled,
+    parse: (value, fallback) => normalizeBooleanValue(value, fallback)
+  },
+  adminAuthMode: {
+    envBase: 'VPS_ADMIN_AUTH_MODE',
+    defaultValue: defaultDualSourceSettings.adminAuthMode,
+    parse: (value, fallback) => normalizeAdminAuthMode(value, fallback)
+  },
+  smbAuthMode: {
+    envBase: 'VPS_SMB_AUTH_MODE',
+    defaultValue: defaultDualSourceSettings.smbAuthMode,
+    parse: (value, fallback) => normalizeProtocolAuthMode(value, fallback)
+  },
+  sftpAuthMode: {
+    envBase: 'VPS_SFTP_AUTH_MODE',
+    defaultValue: defaultDualSourceSettings.sftpAuthMode,
+    parse: (value, fallback) => normalizeProtocolAuthMode(value, fallback)
+  },
+  securityIpAllowlist: {
+    envBase: 'VPS_SECURITY_IP_ALLOWLIST',
+    defaultValue: defaultDualSourceSettings.securityIpAllowlist,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  securityBreakGlassEnabled: {
+    envBase: 'VPS_SECURITY_BREAK_GLASS_ENABLED',
+    defaultValue: defaultDualSourceSettings.securityBreakGlassEnabled,
+    parse: (value, fallback) => normalizeBooleanValue(value, fallback)
+  },
+  securityAuditRetentionDays: {
+    envBase: 'VPS_SECURITY_AUDIT_RETENTION_DAYS',
+    defaultValue: defaultDualSourceSettings.securityAuditRetentionDays,
+    parse: (value, fallback) => parsePositiveInt(value, fallback, { min: 1, max: 3650 })
+  },
+  oidcIssuer: {
+    envBase: 'VPS_OIDC_ISSUER',
+    defaultValue: defaultDualSourceSettings.oidcIssuer,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  oidcClientId: {
+    envBase: 'VPS_OIDC_CLIENT_ID',
+    defaultValue: defaultDualSourceSettings.oidcClientId,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  oidcClientSecret: {
+    envBase: 'VPS_OIDC_CLIENT_SECRET',
+    defaultValue: defaultDualSourceSettings.oidcClientSecret,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  oidcScopes: {
+    envBase: 'VPS_OIDC_SCOPES',
+    defaultValue: defaultDualSourceSettings.oidcScopes,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  oidcAdminGroup: {
+    envBase: 'VPS_OIDC_ADMIN_GROUP',
+    defaultValue: defaultDualSourceSettings.oidcAdminGroup,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  oidcReadOnlyGroup: {
+    envBase: 'VPS_OIDC_READONLY_GROUP',
+    defaultValue: defaultDualSourceSettings.oidcReadOnlyGroup,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  directoryDomain: {
+    envBase: 'VPS_DIRECTORY_DOMAIN',
+    defaultValue: defaultDualSourceSettings.directoryDomain,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  directoryRealm: {
+    envBase: 'VPS_DIRECTORY_REALM',
+    defaultValue: defaultDualSourceSettings.directoryRealm,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  directoryUrl: {
+    envBase: 'VPS_DIRECTORY_URL',
+    defaultValue: defaultDualSourceSettings.directoryUrl,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  directoryBindDn: {
+    envBase: 'VPS_DIRECTORY_BIND_DN',
+    defaultValue: defaultDualSourceSettings.directoryBindDn,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  directoryBindPassword: {
+    envBase: 'VPS_DIRECTORY_BIND_PASSWORD',
+    defaultValue: defaultDualSourceSettings.directoryBindPassword,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  workgroupMappingsJson: {
+    envBase: 'VPS_WORKGROUP_MAPPINGS_JSON',
+    defaultValue: defaultDualSourceSettings.workgroupMappingsJson,
+    parse: (value, fallback) => normalizeWorkgroupMappingsJson(value, fallback)
+  },
+  mountPolicyMode: {
+    envBase: 'VPS_MOUNT_POLICY_MODE',
+    defaultValue: defaultDualSourceSettings.mountPolicyMode,
+    parse: (value, fallback) => normalizeMountPolicyMode(value, fallback)
+  },
+  postgresEnabled: {
+    envBase: 'VPS_POSTGRES_ENABLED',
+    defaultValue: defaultDualSourceSettings.postgresEnabled,
+    parse: (value, fallback) => normalizeBooleanValue(value, fallback)
+  },
+  postgresHost: {
+    envBase: 'VPS_POSTGRES_HOST',
+    defaultValue: defaultDualSourceSettings.postgresHost,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  postgresPort: {
+    envBase: 'VPS_POSTGRES_PORT',
+    defaultValue: defaultDualSourceSettings.postgresPort,
+    parse: (value, fallback) => parsePositiveInt(value, fallback, { min: 1, max: 65535 })
+  },
+  postgresDatabase: {
+    envBase: 'VPS_POSTGRES_DATABASE',
+    defaultValue: defaultDualSourceSettings.postgresDatabase,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  postgresUser: {
+    envBase: 'VPS_POSTGRES_USER',
+    defaultValue: defaultDualSourceSettings.postgresUser,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  postgresPassword: {
+    envBase: 'VPS_POSTGRES_PASSWORD',
+    defaultValue: defaultDualSourceSettings.postgresPassword,
+    parse: (value, fallback) => normalizeStringValue(value, fallback)
+  },
+  postgresSslMode: {
+    envBase: 'VPS_POSTGRES_SSL_MODE',
+    defaultValue: defaultDualSourceSettings.postgresSslMode,
+    parse: (value, fallback) => normalizePostgresSslMode(value, fallback)
+  }
+});
+
+function resolveDualSourceSettings(settings = {}) {
+  const values = {};
+  const config = {};
+  for (const [key, spec] of Object.entries(dualSourceSettingSpecs)) {
+    let value = spec.defaultValue;
+    let source = 'app_default';
+    let locked = false;
+
+    const envDefaultKey = `${spec.envBase}_DEFAULT`;
+    if (Object.prototype.hasOwnProperty.call(process.env, envDefaultKey)) {
+      value = spec.parse(process.env[envDefaultKey], value);
+      source = 'default_env';
+    }
+
+    if (Object.prototype.hasOwnProperty.call(settings, key)) {
+      value = spec.parse(settings[key], value);
+      source = 'ui';
+    }
+
+    const envForceKey = `${spec.envBase}_FORCE`;
+    if (Object.prototype.hasOwnProperty.call(process.env, envForceKey)) {
+      value = spec.parse(process.env[envForceKey], value);
+      source = 'force_env';
+      locked = true;
+    }
+
+    values[key] = value;
+    config[key] = { value, source, locked };
+  }
+  return { values, config };
+}
+
+function ensureDualSourceSettingsShape(settings) {
+  let changed = false;
+  for (const [key, spec] of Object.entries(dualSourceSettingSpecs)) {
+    const current = Object.prototype.hasOwnProperty.call(settings, key) ? settings[key] : undefined;
+    const normalized = spec.parse(current, spec.defaultValue);
+    if (current === undefined || current !== normalized) {
+      settings[key] = normalized;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function assertMutableDualSourcePayload(payload, settings) {
+  const { config } = resolveDualSourceSettings(settings);
+  const lockedKeys = Object.entries(config)
+    .filter(([, value]) => value.locked)
+    .map(([key]) => key);
+  for (const key of lockedKeys) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      throw Object.assign(new Error(`Setting "${key}" is locked by environment`), { statusCode: 400 });
+    }
+  }
+}
+
+function applyDualSourcePayload(settings, payload = {}) {
+  for (const [key, spec] of Object.entries(dualSourceSettingSpecs)) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) {
+      continue;
+    }
+    settings[key] = spec.parse(payload[key], spec.defaultValue);
+  }
+}
+
+function effectiveConfigSourceSummary(settings) {
+  const resolved = resolveDualSourceSettings(settings);
+  const requiresPostgres = true;
+  const postgresConfigured = Boolean(
+    resolved.values.postgresHost &&
+    resolved.values.postgresDatabase &&
+    resolved.values.postgresUser &&
+    resolved.values.postgresPassword
+  );
+  return {
+    values: resolved.values,
+    config: resolved.config,
+    postgres: {
+      required: requiresPostgres,
+      configured: !requiresPostgres || postgresConfigured
+    }
+  };
+}
+
+function assertPostgresConfigured(settings) {
+  const summary = effectiveConfigSourceSummary(settings);
+  if (!summary.values.postgresEnabled) {
+    throw Object.assign(new Error('postgresEnabled must be true because settings/config now use Postgres storage'), { statusCode: 400 });
+  }
+  if (!summary.postgres.configured) {
+    throw Object.assign(new Error('Postgres host, database, user, and password are required'), { statusCode: 400 });
+  }
+  return summary;
+}
+
+function resolveApiToken(settings = {}) {
+  const token = String(settings?.apiToken || '').trim();
+  return token || apiToken;
+}
+
+function resolveAdminSessionSeconds(settings = {}) {
+  return parsePositiveInt(settings?.adminSessionSeconds, adminSessionSeconds, { min: 60, max: 30 * 24 * 60 * 60 });
+}
+
+function resolveMountPollSeconds(settings = {}) {
+  return parsePositiveInt(settings?.mountPollSeconds, mountPollSeconds, { min: 10, max: 86400 });
+}
+
+function normalizeCacheDir(value, fallback = defaultVpsCacheDir) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  return trimmed.replace(/[\\\r\n\t\0]/g, '');
+}
+
+function normalizeVpsCacheSettings(settings = {}) {
+  return {
+    cacheDir: normalizeCacheDir(settings?.vpsCacheDir, defaultVpsCacheDir),
+    enabled: settings?.vpsCacheEnabled !== false,
+    writeBackSeconds: parsePositiveInt(
+      settings?.vpsWriteBackSeconds,
+      defaultVpsCacheSettings.writeBackSeconds,
+      { min: 5, max: 86400 }
+    ),
+    maxSizeGb: parsePositiveInt(settings?.vpsCacheMaxSizeGb, defaultVpsCacheSettings.maxSizeGb, { min: 1, max: 10240 }),
+    maxAgeHours: parsePositiveInt(settings?.vpsCacheMaxAgeHours, defaultVpsCacheSettings.maxAgeHours, { min: 1, max: 720 }),
+    readAheadMb: parsePositiveInt(settings?.vpsReadAheadMb, defaultVpsCacheSettings.readAheadMb, { min: 1, max: 2048 })
+  };
+}
+
+function applyNormalizedVpsCacheSettings(settings, normalized) {
+  let changed = false;
+  if (settings.vpsCacheDir !== normalized.cacheDir) {
+    settings.vpsCacheDir = normalized.cacheDir;
+    changed = true;
+  }
+  if (settings.vpsCacheEnabled !== normalized.enabled) {
+    settings.vpsCacheEnabled = normalized.enabled;
+    changed = true;
+  }
+  if (settings.vpsWriteBackSeconds !== normalized.writeBackSeconds) {
+    settings.vpsWriteBackSeconds = normalized.writeBackSeconds;
+    changed = true;
+  }
+  if (settings.vpsCacheMaxSizeGb !== normalized.maxSizeGb) {
+    settings.vpsCacheMaxSizeGb = normalized.maxSizeGb;
+    changed = true;
+  }
+  if (settings.vpsCacheMaxAgeHours !== normalized.maxAgeHours) {
+    settings.vpsCacheMaxAgeHours = normalized.maxAgeHours;
+    changed = true;
+  }
+  if (settings.vpsReadAheadMb !== normalized.readAheadMb) {
+    settings.vpsReadAheadMb = normalized.readAheadMb;
+    changed = true;
+  }
+  return changed;
 }
 
 function trimTextBuffer(text, maxChars) {
@@ -731,9 +1225,20 @@ function normalizeMetadataShape(metadata) {
           smbEnabled: true,
           sftpEnabled: true,
           mountManagementEnabled: true,
+          smbStreamsBackend,
+          mountPollSeconds,
+          vpsCacheDir: defaultVpsCacheDir,
+          vpsCacheEnabled: defaultVpsCacheSettings.enabled,
+          vpsWriteBackSeconds: defaultVpsCacheSettings.writeBackSeconds,
+          vpsCacheMaxSizeGb: defaultVpsCacheSettings.maxSizeGb,
+          vpsCacheMaxAgeHours: defaultVpsCacheSettings.maxAgeHours,
+          vpsReadAheadMb: defaultVpsCacheSettings.readAheadMb,
+          apiToken: '',
+          adminSessionSeconds,
           setupCompleted: false,
           adminUsername: '',
-          adminPassword: ''
+          adminPassword: '',
+          ...defaultDualSourceSettings
         },
         cloudMounts: {},
         disks: {}
@@ -750,9 +1255,20 @@ function normalizeMetadataShape(metadata) {
       smbEnabled: true,
       sftpEnabled: true,
       mountManagementEnabled: true,
+      smbStreamsBackend,
+      mountPollSeconds,
+      vpsCacheDir: defaultVpsCacheDir,
+      vpsCacheEnabled: defaultVpsCacheSettings.enabled,
+      vpsWriteBackSeconds: defaultVpsCacheSettings.writeBackSeconds,
+      vpsCacheMaxSizeGb: defaultVpsCacheSettings.maxSizeGb,
+      vpsCacheMaxAgeHours: defaultVpsCacheSettings.maxAgeHours,
+      vpsReadAheadMb: defaultVpsCacheSettings.readAheadMb,
+      apiToken: '',
+      adminSessionSeconds,
       setupCompleted: false,
       adminUsername: '',
-      adminPassword: ''
+      adminPassword: '',
+      ...defaultDualSourceSettings
     };
     changed = true;
   } else {
@@ -780,6 +1296,30 @@ function normalizeMetadataShape(metadata) {
       metadata.settings.mountManagementEnabled = true;
       changed = true;
     }
+    const normalizedStreamsBackend = normalizeSambaStreamsBackend(metadata.settings.smbStreamsBackend);
+    if (metadata.settings.smbStreamsBackend !== normalizedStreamsBackend) {
+      metadata.settings.smbStreamsBackend = normalizedStreamsBackend;
+      changed = true;
+    }
+    const normalizedMountPollSeconds = resolveMountPollSeconds(metadata.settings);
+    if (metadata.settings.mountPollSeconds !== normalizedMountPollSeconds) {
+      metadata.settings.mountPollSeconds = normalizedMountPollSeconds;
+      changed = true;
+    }
+    const normalizedCacheSettings = normalizeVpsCacheSettings(metadata.settings);
+    if (applyNormalizedVpsCacheSettings(metadata.settings, normalizedCacheSettings)) {
+      changed = true;
+    }
+    const normalizedApiToken = String(metadata.settings.apiToken || '').trim();
+    if (metadata.settings.apiToken !== normalizedApiToken) {
+      metadata.settings.apiToken = normalizedApiToken;
+      changed = true;
+    }
+    const normalizedAdminSessionSeconds = resolveAdminSessionSeconds(metadata.settings);
+    if (metadata.settings.adminSessionSeconds !== normalizedAdminSessionSeconds) {
+      metadata.settings.adminSessionSeconds = normalizedAdminSessionSeconds;
+      changed = true;
+    }
     if (metadata.settings.setupCompleted === undefined) {
       metadata.settings.setupCompleted = false;
       changed = true;
@@ -790,6 +1330,9 @@ function normalizeMetadataShape(metadata) {
     }
     if (metadata.settings.adminPassword === undefined) {
       metadata.settings.adminPassword = '';
+      changed = true;
+    }
+    if (ensureDualSourceSettingsShape(metadata.settings)) {
       changed = true;
     }
   }
@@ -1021,11 +1564,41 @@ function normalizeMetadataShape(metadata) {
 
 async function loadMetadata() {
   const raw = await metadataStore.load();
-  const { metadata, changed } = normalizeMetadataShape(raw);
-  if (changed) {
+  const normalized = normalizeMetadataShape(raw);
+  let { metadata } = normalized;
+  let metadataChanged = normalized.changed;
+  let saveSettingsToPostgres = false;
+
+  const settingsFromPostgres = await postgresSettingsStore.loadSettings();
+  if (settingsFromPostgres && typeof settingsFromPostgres === 'object') {
+    const postgresSettingsSnapshot = JSON.stringify(settingsFromPostgres);
+    const previousSettings = JSON.stringify(metadata.settings);
+    metadata.settings = {
+      ...metadata.settings,
+      ...settingsFromPostgres
+    };
+    const mergedNormalized = normalizeMetadataShape(metadata);
+    metadata = mergedNormalized.metadata;
+    const settingsChangedFromMerge = previousSettings !== JSON.stringify(metadata.settings);
+    metadataChanged = metadataChanged || mergedNormalized.changed || settingsChangedFromMerge;
+    saveSettingsToPostgres = postgresSettingsSnapshot !== JSON.stringify(metadata.settings);
+  } else {
+    saveSettingsToPostgres = true;
+  }
+
+  if (metadataChanged) {
     await metadataStore.save(metadata);
   }
+
+  if (saveSettingsToPostgres) {
+    await postgresSettingsStore.saveSettings(metadata.settings);
+  }
   mountManager.setDefinitions(metadata.cloudMounts);
+  mountManager.setPollSeconds(resolveMountPollSeconds(metadata.settings));
+  const normalizedCacheSettings = normalizeVpsCacheSettings(metadata.settings);
+  mountManager.setCacheDir(normalizedCacheSettings.cacheDir);
+  mountManager.setCachePolicy(normalizedCacheSettings);
+  sambaManager.setStreamsBackend(metadata.settings.smbStreamsBackend);
   return metadata;
 }
 
@@ -1034,7 +1607,13 @@ async function updateMetadata(updateFn) {
     const normalized = normalizeMetadataShape(draft).metadata;
     return updateFn(normalized);
   });
+  await postgresSettingsStore.saveSettings(updated.settings);
   mountManager.setDefinitions(updated.cloudMounts);
+  mountManager.setPollSeconds(resolveMountPollSeconds(updated.settings));
+  const normalizedCacheSettings = normalizeVpsCacheSettings(updated.settings);
+  mountManager.setCacheDir(normalizedCacheSettings.cacheDir);
+  mountManager.setCachePolicy(normalizedCacheSettings);
+  sambaManager.setStreamsBackend(updated.settings.smbStreamsBackend);
   return updated;
 }
 
@@ -1065,8 +1644,8 @@ function newSessionToken() {
   return randomBytes(32).toString('hex');
 }
 
-function setSessionCookie(res, token) {
-  const maxAge = Math.max(60, adminSessionSeconds);
+function setSessionCookie(res, token, sessionSeconds = adminSessionSeconds) {
+  const maxAge = Math.max(60, Number(sessionSeconds) || adminSessionSeconds);
   res.setHeader('Set-Cookie', `${cookieName}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`);
 }
 
@@ -1074,9 +1653,10 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${cookieName}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
 }
 
-function createSession(user = adminUsername) {
+function createSession(user = adminUsername, sessionSeconds = adminSessionSeconds) {
   const token = newSessionToken();
-  const expiresAt = Date.now() + adminSessionSeconds * 1000;
+  const ttlSeconds = Math.max(60, Number(sessionSeconds) || adminSessionSeconds);
+  const expiresAt = Date.now() + ttlSeconds * 1000;
   sessions.set(token, { expiresAt, user });
   return token;
 }
@@ -1108,8 +1688,14 @@ function assertAdmin(req) {
   return session;
 }
 
-function assertApiAuth(req) {
-  const expected = `Bearer ${apiToken}`;
+async function assertApiAuth(req) {
+  let settings = null;
+  try {
+    settings = (await loadMetadata()).settings;
+  } catch {
+    settings = null;
+  }
+  const expected = `Bearer ${resolveApiToken(settings)}`;
   if (req.headers.authorization !== expected) {
     throw Object.assign(new Error('Unauthorized'), { statusCode: 401 });
   }
@@ -1189,6 +1775,47 @@ function assertMountManagementEnabled(settings) {
     ? 'Cloud mount management is disabled by VPS_MOUNT_MANAGE_ENABLED'
     : 'Cloud mount management is disabled in settings';
   throw Object.assign(new Error(reason), { statusCode: 400 });
+}
+
+function buildSettingsResponse(settings) {
+  const configSummary = effectiveConfigSourceSummary(settings);
+  return {
+    settings: {
+      hostname: settings.hostname,
+      rootShareName: settings.rootShareName,
+      smbPublicPort: effectiveSmbPublicPort(settings),
+      smbEnabled: isSmbFeatureEnabled(settings),
+      sftpEnabled: isSftpFeatureEnabled(settings),
+      mountManagementEnabled: isMountManagementEnabled(settings),
+      smbStreamsBackend: normalizeSambaStreamsBackend(settings.smbStreamsBackend),
+      mountPollSeconds: resolveMountPollSeconds(settings),
+      vpsCacheDir: normalizeCacheDir(settings.vpsCacheDir, defaultVpsCacheDir),
+      vpsCacheEnabled: settings.vpsCacheEnabled !== false,
+      vpsWriteBackSeconds: parsePositiveInt(settings.vpsWriteBackSeconds, defaultVpsCacheSettings.writeBackSeconds, {
+        min: 5,
+        max: 86400
+      }),
+      vpsCacheMaxSizeGb: parsePositiveInt(settings.vpsCacheMaxSizeGb, defaultVpsCacheSettings.maxSizeGb, {
+        min: 1,
+        max: 10240
+      }),
+      vpsCacheMaxAgeHours: parsePositiveInt(settings.vpsCacheMaxAgeHours, defaultVpsCacheSettings.maxAgeHours, {
+        min: 1,
+        max: 720
+      }),
+      vpsReadAheadMb: parsePositiveInt(settings.vpsReadAheadMb, defaultVpsCacheSettings.readAheadMb, {
+        min: 1,
+        max: 2048
+      }),
+      adminUsername: settings.adminUsername || adminUsername,
+      adminSessionSeconds: resolveAdminSessionSeconds(settings),
+      apiTokenConfigured: Boolean(resolveApiToken(settings)),
+      setupCompleted: settings.setupCompleted === true,
+      ...configSummary.values
+    },
+    settingsConfig: configSummary.config,
+    postgres: configSummary.postgres
+  };
 }
 
 function sftpConnectionInfo(host, settings) {
@@ -1522,19 +2149,28 @@ function requestHost(req, metadata) {
 
 async function getEffectiveAdminCreds() {
   try {
-    const raw = await metadataStore.load();
-    const { metadata } = normalizeMetadataShape(raw);
+    const metadata = await loadMetadata();
     return {
       username: metadata.settings.adminUsername || adminUsername,
-      password: metadata.settings.adminPassword || adminPassword
+      password: metadata.settings.adminPassword || adminPassword,
+      sessionSeconds: resolveAdminSessionSeconds(metadata.settings)
     };
   } catch {
-    return { username: adminUsername, password: adminPassword };
+    return { username: adminUsername, password: adminPassword, sessionSeconds: adminSessionSeconds };
   }
 }
 
 async function handleAdminApi(req, res, url) {
   if (req.method === 'POST' && url.pathname === '/admin/api/login') {
+    const metadata = await loadMetadata();
+    const configSummary = effectiveConfigSourceSummary(metadata.settings);
+    if (configSummary.values.adminAuthMode !== 'local' && configSummary.values.securityBreakGlassEnabled === false) {
+      throw Object.assign(
+        new Error('Local username/password login is disabled. Use configured SSO provider or re-enable break-glass access.'),
+        { statusCode: 403 }
+      );
+    }
+
     const payload = await readJsonBody(req);
     const creds = await getEffectiveAdminCreds();
     const isValid = timingSafeStringEqual(payload.username || '', creds.username) && timingSafeStringEqual(payload.password || '', creds.password);
@@ -1543,8 +2179,8 @@ async function handleAdminApi(req, res, url) {
       throw Object.assign(new Error('Invalid credentials'), { statusCode: 401 });
     }
 
-    const token = createSession(creds.username);
-    setSessionCookie(res, token);
+    const token = createSession(creds.username, creds.sessionSeconds);
+    setSessionCookie(res, token, creds.sessionSeconds);
     sendJson(res, 200, { ok: true, username: creds.username });
     return;
   }
@@ -1670,16 +2306,9 @@ async function handleAdminApi(req, res, url) {
     const smbEnabled = isSmbFeatureEnabled(settings);
     const mountManagementEnabled = isMountManagementEnabled(settings);
 
+    const resolvedSettings = buildSettingsResponse(settings);
     sendJson(res, 200, {
-      settings: {
-        hostname: settings.hostname,
-        rootShareName: settings.rootShareName,
-        smbPublicPort: effectiveSmbPublicPort(settings),
-        smbEnabled,
-        sftpEnabled: isSftpFeatureEnabled(settings),
-        mountManagementEnabled,
-        setupCompleted: settings.setupCompleted === true
-      },
+      ...resolvedSettings,
       samba: {
         ...sambaStatus,
         settingEnabled: smbEnabled,
@@ -1702,9 +2331,20 @@ async function handleAdminApi(req, res, url) {
 
   if (req.method === 'POST' && url.pathname === '/admin/api/setup') {
     const payload = await readJsonBody(req);
+    const metadataBefore = await loadMetadata();
+    assertMutableDualSourcePayload(payload, metadataBefore.settings);
 
     if (payload.adminPassword && String(payload.adminPassword).length < 8) {
       throw Object.assign(new Error('Admin password must be at least 8 characters'), { statusCode: 400 });
+    }
+    if (payload.apiToken !== undefined) {
+      const token = String(payload.apiToken).trim();
+      if (token && token.length < 16) {
+        throw Object.assign(new Error('API token must be at least 16 characters'), { statusCode: 400 });
+      }
+    }
+    if (payload.workgroupMappingsJson !== undefined && !isValidWorkgroupMappingsJson(payload.workgroupMappingsJson)) {
+      throw Object.assign(new Error('workgroupMappingsJson must be a JSON array'), { statusCode: 400 });
     }
 
     const metadata = await updateMetadata((draft) => {
@@ -1732,35 +2372,93 @@ async function handleAdminApi(req, res, url) {
       if (payload.mountManagementEnabled !== undefined) {
         draft.settings.mountManagementEnabled = Boolean(payload.mountManagementEnabled);
       }
+      if (payload.smbStreamsBackend !== undefined) {
+        draft.settings.smbStreamsBackend = normalizeSambaStreamsBackend(payload.smbStreamsBackend);
+      }
+      if (payload.mountPollSeconds !== undefined) {
+        draft.settings.mountPollSeconds = resolveMountPollSeconds({ mountPollSeconds: payload.mountPollSeconds });
+      }
+      if (payload.vpsCacheDir !== undefined) {
+        draft.settings.vpsCacheDir = normalizeCacheDir(payload.vpsCacheDir, defaultVpsCacheDir);
+      }
+      if (payload.vpsCacheEnabled !== undefined) {
+        draft.settings.vpsCacheEnabled = Boolean(payload.vpsCacheEnabled);
+      }
+      if (payload.vpsWriteBackSeconds !== undefined) {
+        draft.settings.vpsWriteBackSeconds = parsePositiveInt(
+          payload.vpsWriteBackSeconds,
+          defaultVpsCacheSettings.writeBackSeconds,
+          { min: 5, max: 86400 }
+        );
+      }
+      if (payload.vpsCacheMaxSizeGb !== undefined) {
+        draft.settings.vpsCacheMaxSizeGb = parsePositiveInt(payload.vpsCacheMaxSizeGb, defaultVpsCacheSettings.maxSizeGb, {
+          min: 1,
+          max: 10240
+        });
+      }
+      if (payload.vpsCacheMaxAgeHours !== undefined) {
+        draft.settings.vpsCacheMaxAgeHours = parsePositiveInt(payload.vpsCacheMaxAgeHours, defaultVpsCacheSettings.maxAgeHours, {
+          min: 1,
+          max: 720
+        });
+      }
+      if (payload.vpsReadAheadMb !== undefined) {
+        draft.settings.vpsReadAheadMb = parsePositiveInt(payload.vpsReadAheadMb, defaultVpsCacheSettings.readAheadMb, {
+          min: 1,
+          max: 2048
+        });
+      }
+      if (payload.adminSessionSeconds !== undefined) {
+        draft.settings.adminSessionSeconds = resolveAdminSessionSeconds({ adminSessionSeconds: payload.adminSessionSeconds });
+      }
+      if (payload.apiToken !== undefined) {
+        const token = String(payload.apiToken).trim();
+        if (token) {
+          draft.settings.apiToken = token;
+        }
+      }
+      applyDualSourcePayload(draft.settings, payload);
       if (payload.markSetupComplete !== false) {
         draft.settings.setupCompleted = true;
       }
       return draft;
     });
+    assertPostgresConfigured(metadata.settings);
 
     if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
       await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
+      await applyAllDiskSharesOnStartup(metadata);
     }
 
-    sendJson(res, 200, {
-      ok: true,
-      settings: {
-        hostname: metadata.settings.hostname,
-        rootShareName: metadata.settings.rootShareName,
-        smbPublicPort: effectiveSmbPublicPort(metadata.settings),
-        smbEnabled: isSmbFeatureEnabled(metadata.settings),
-        sftpEnabled: isSftpFeatureEnabled(metadata.settings),
-        mountManagementEnabled: isMountManagementEnabled(metadata.settings),
-        setupCompleted: true
-      }
-    });
+    sendJson(res, 200, { ok: true, ...buildSettingsResponse(metadata.settings) });
     return;
   }
 
   if (req.method === 'PUT' && url.pathname === '/admin/api/settings') {
     const payload = await readJsonBody(req);
+    const metadataBefore = await loadMetadata();
+    assertMutableDualSourcePayload(payload, metadataBefore.settings);
+    if (payload.adminPassword && String(payload.adminPassword).length < 8) {
+      throw Object.assign(new Error('Admin password must be at least 8 characters'), { statusCode: 400 });
+    }
+    if (payload.apiToken !== undefined) {
+      const token = String(payload.apiToken).trim();
+      if (token && token.length < 16) {
+        throw Object.assign(new Error('API token must be at least 16 characters'), { statusCode: 400 });
+      }
+    }
+    if (payload.workgroupMappingsJson !== undefined && !isValidWorkgroupMappingsJson(payload.workgroupMappingsJson)) {
+      throw Object.assign(new Error('workgroupMappingsJson must be a JSON array'), { statusCode: 400 });
+    }
     const metadata = await updateMetadata((draft) => {
       draft.settings.hostname = payload.hostname ?? draft.settings.hostname;
+      if (payload.adminUsername && String(payload.adminUsername).trim()) {
+        draft.settings.adminUsername = String(payload.adminUsername).trim();
+      }
+      if (payload.adminPassword) {
+        draft.settings.adminPassword = String(payload.adminPassword);
+      }
       if (payload.rootShareName) {
         draft.settings.rootShareName = sanitizeShareName(payload.rootShareName);
       }
@@ -1776,14 +2474,63 @@ async function handleAdminApi(req, res, url) {
       if (payload.mountManagementEnabled !== undefined) {
         draft.settings.mountManagementEnabled = Boolean(payload.mountManagementEnabled);
       }
+      if (payload.smbStreamsBackend !== undefined) {
+        draft.settings.smbStreamsBackend = normalizeSambaStreamsBackend(payload.smbStreamsBackend);
+      }
+      if (payload.mountPollSeconds !== undefined) {
+        draft.settings.mountPollSeconds = resolveMountPollSeconds({ mountPollSeconds: payload.mountPollSeconds });
+      }
+      if (payload.vpsCacheDir !== undefined) {
+        draft.settings.vpsCacheDir = normalizeCacheDir(payload.vpsCacheDir, defaultVpsCacheDir);
+      }
+      if (payload.vpsCacheEnabled !== undefined) {
+        draft.settings.vpsCacheEnabled = Boolean(payload.vpsCacheEnabled);
+      }
+      if (payload.vpsWriteBackSeconds !== undefined) {
+        draft.settings.vpsWriteBackSeconds = parsePositiveInt(
+          payload.vpsWriteBackSeconds,
+          defaultVpsCacheSettings.writeBackSeconds,
+          { min: 5, max: 86400 }
+        );
+      }
+      if (payload.vpsCacheMaxSizeGb !== undefined) {
+        draft.settings.vpsCacheMaxSizeGb = parsePositiveInt(payload.vpsCacheMaxSizeGb, defaultVpsCacheSettings.maxSizeGb, {
+          min: 1,
+          max: 10240
+        });
+      }
+      if (payload.vpsCacheMaxAgeHours !== undefined) {
+        draft.settings.vpsCacheMaxAgeHours = parsePositiveInt(payload.vpsCacheMaxAgeHours, defaultVpsCacheSettings.maxAgeHours, {
+          min: 1,
+          max: 720
+        });
+      }
+      if (payload.vpsReadAheadMb !== undefined) {
+        draft.settings.vpsReadAheadMb = parsePositiveInt(payload.vpsReadAheadMb, defaultVpsCacheSettings.readAheadMb, {
+          min: 1,
+          max: 2048
+        });
+      }
+      if (payload.adminSessionSeconds !== undefined) {
+        draft.settings.adminSessionSeconds = resolveAdminSessionSeconds({ adminSessionSeconds: payload.adminSessionSeconds });
+      }
+      if (payload.apiToken !== undefined) {
+        const token = String(payload.apiToken).trim();
+        if (token) {
+          draft.settings.apiToken = token;
+        }
+      }
+      applyDualSourcePayload(draft.settings, payload);
       return draft;
     });
+    assertPostgresConfigured(metadata.settings);
 
     if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
       await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
+      await applyAllDiskSharesOnStartup(metadata);
     }
 
-    sendJson(res, 200, { settings: metadata.settings });
+    sendJson(res, 200, buildSettingsResponse(metadata.settings));
     return;
   }
 
@@ -2243,7 +2990,7 @@ async function handleAdminApi(req, res, url) {
 }
 
 async function handleApi(req, res, url) {
-  assertApiAuth(req);
+  await assertApiAuth(req);
 
   if (req.method === 'GET' && url.pathname === '/api/disks') {
     const metadata = await loadMetadata();
@@ -2485,12 +3232,15 @@ async function main() {
   await ensureRuntimeLogFiles();
   startTerminalGc();
   const metadata = await loadMetadata();
+  assertPostgresConfigured(metadata.settings);
+  const effectiveApiToken = resolveApiToken(metadata.settings);
+  const effectiveAdminPassword = metadata.settings.adminPassword || adminPassword;
 
-  if (apiToken === 'change-me') {
+  if (effectiveApiToken === 'change-me') {
     console.warn('WARNING: VPS_API_TOKEN is using default value `change-me`. Set a secure token in production.');
   }
 
-  if (adminPassword === 'change-admin-password') {
+  if (effectiveAdminPassword === 'change-admin-password') {
     console.warn('WARNING: VPS_ADMIN_PASSWORD is using default value `change-admin-password`. Set a secure admin password.');
   }
 
@@ -2592,6 +3342,7 @@ async function main() {
       subscriber.res.end();
       logSubscribers.delete(subscriber);
     }
+    await postgresSettingsStore.close().catch(() => { });
     await mountManager.stop().catch(() => { });
     await Promise.all(
       servers.map(

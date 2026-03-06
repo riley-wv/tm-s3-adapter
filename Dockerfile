@@ -21,12 +21,19 @@ ENV NODE_ENV=production \
     VPS_SAMBA_RESTART_CMD="smbcontrol all reload-config || pkill -HUP smbd || true" \
     VPS_MOUNT_MANAGE_ENABLED=true \
     VPS_MOUNT_POLL_SECONDS=30 \
+    VPS_RCLONE_CACHE_DIR=/data/vps/rclone-vfs-cache \
     VPSD_RCLONE_BINARY=rclone \
     VPS_SFTP_PORT=2222 \
     VPS_SFTP_USERNAME=tmbackup \
     VPS_SFTP_PASSWORD=tmbackup123 \
     VPS_SFTP_UID=10000 \
-    VPS_SFTP_GID=10000
+    VPS_SFTP_GID=10000 \
+    VPS_POSTGRES_HOST=postgres \
+    VPS_POSTGRES_PORT=5432 \
+    VPS_POSTGRES_DATABASE=tm_adapter \
+    VPS_POSTGRES_USER=tm_adapter \
+    VPS_POSTGRES_PASSWORD=tm_adapter \
+    VPS_POSTGRES_SSL_MODE=disable
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
