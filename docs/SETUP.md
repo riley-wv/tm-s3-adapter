@@ -196,6 +196,7 @@ At minimum, back up:
 
 - Use SMB port 445 where possible in production
 - Validate xattrs/streams support (`streams_xattr`)
+- `streams_xattr` requires real filesystem xattrs on the share path; `rclone mount` cloud paths usually cannot provide them
 - If clients can connect but all writes fail with I/O errors, set `VPS_SAMBA_STREAMS_BACKEND=depot` and restart the container
 - Test a `local` drive first to isolate cloud mount issues
 

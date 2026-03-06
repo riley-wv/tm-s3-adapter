@@ -11,7 +11,7 @@ import { ensureDir, safeJoin, walkFiles } from '../shared/fsUtils.mjs';
 import { handleError, parseUrl, readJsonBody, sendJson, sendNoContent } from '../shared/http.mjs';
 import { JsonStore } from '../shared/jsonStore.mjs';
 import { PostgresSettingsStore } from '../shared/postgresSettingsStore.mjs';
-import { SambaManager } from './sambaManager.mjs';
+import { buildXattrProbeFailureMessage, probeXattrSupport, SambaManager } from './sambaManager.mjs';
 import { CloudMountManager } from './cloudMountManager.mjs';
 import { SftpManager } from './sftpManager.mjs';
 
@@ -1975,10 +1975,28 @@ function hasSambaDiskConfig(disk) {
   );
 }
 
+async function assertDiskSambaCompatibility(disk, settings) {
+  if (normalizeSambaStreamsBackend(settings?.smbStreamsBackend) !== 'xattr') {
+    return;
+  }
+
+  const probe = await probeXattrSupport(disk.storagePath);
+  if (probe.ok) {
+    return;
+  }
+
+  throw new Error(buildXattrProbeFailureMessage({
+    storagePath: disk.storagePath,
+    storageMode: disk.storageMode,
+    reason: probe.reason
+  }));
+}
+
 async function ensureDiskShareApplied(disk, settings) {
   if (!hasSambaDiskConfig(disk)) {
     throw new Error(`Disk ${disk?.id || '<unknown>'} is missing SMB configuration fields`);
   }
+  await assertDiskSambaCompatibility(disk, settings);
   const result = await sambaManager.applyDisk(disk);
   const rootResult = await sambaManager.applyRootShare(settings.rootShareName, smbShareRoot);
   return { disk: result, root: rootResult };
@@ -2019,6 +2037,7 @@ async function applyAllDiskSharesOnStartup(metadata) {
 
     try {
       await ensureDiskStoragePathReady(disk, metadata.settings);
+      await assertDiskSambaCompatibility(disk, metadata.settings);
       const result = await sambaManager.applyDisk(disk);
       applyResults[diskId] = {
         applied: result.applied === true,

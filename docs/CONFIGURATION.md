@@ -244,6 +244,8 @@ Generated shares include:
 
 The root share (`rootShareName`) is also generated when Samba management is enabled, but it is not marked as a Time Machine share.
 
+When `streams_xattr` is selected, the adapter now probes the target share path for real xattr support before applying Samba. This works on local Linux filesystems with xattrs enabled, but typically fails on `rclone mount` / FUSE-backed cloud paths, which should use `streams_depot` instead.
+
 ## Production hardening checklist
 
 - Set strong secrets for admin/API/SFTP in `.env`

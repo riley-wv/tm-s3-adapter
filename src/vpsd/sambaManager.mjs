@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
@@ -47,6 +48,39 @@ function fruitProfile(streamsBackend) {
     locking: 'none',
     encoding: 'native'
   };
+}
+
+export function buildXattrProbeFailureMessage({ storagePath, storageMode, reason }) {
+  const location = storagePath || '<unknown>';
+  const mode = String(storageMode || 'unknown');
+  const tail = reason ? ` Probe failed: ${reason}` : '';
+  const modeHint = mode === 'cloud-mount'
+    ? ' Cloud-mounted paths managed through rclone/FUSE typically do not expose the POSIX xattrs required by Samba.'
+    : '';
+  return `SMB streams backend "xattr" requires filesystem extended attributes on ${location}.${tail}${modeHint} Use depot mode or move the disk to a local filesystem with xattr support.`;
+}
+
+export async function probeXattrSupport(storagePath) {
+  const probeFile = join(storagePath, `.tm-xattr-probe-${randomUUID()}`);
+  const attrName = 'user.tm_adapter_probe';
+  const attrValue = 'ok';
+
+  try {
+    await writeFile(probeFile, '', 'utf8');
+    await runCommand('setfattr', ['-n', attrName, '-v', attrValue, probeFile]);
+    const { stdout } = await runCommand('getfattr', ['--only-values', '-n', attrName, probeFile]);
+    if (stdout.trim() !== attrValue) {
+      return { ok: false, reason: `xattr round-trip returned ${JSON.stringify(stdout.trim())}` };
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: String(error?.stderr || error?.message || error).trim()
+    };
+  } finally {
+    await rm(probeFile, { force: true }).catch(() => { });
+  }
 }
 
 export function buildDiskShareConfig(disk, streamsBackend) {

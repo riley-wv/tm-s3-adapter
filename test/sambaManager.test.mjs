@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-import { buildDiskShareConfig, buildRootShareConfig } from '../src/vpsd/sambaManager.mjs';
+import { buildDiskShareConfig, buildRootShareConfig, buildXattrProbeFailureMessage } from '../src/vpsd/sambaManager.mjs';
 
 const disk = {
   smbShareName: 'tm-disk',
@@ -50,4 +50,17 @@ test('container smb.conf does not ship a placeholder Time Machine share', async 
 
   assert.match(config, /vfs objects = fruit streams_xattr/);
   assert.doesNotMatch(config, /\[TimeMachineBackup\]/);
+});
+
+test('xattr probe failure message explains cloud-mount limitation', () => {
+  const message = buildXattrProbeFailureMessage({
+    storagePath: '/mnt/tm-cloud/disk-1',
+    storageMode: 'cloud-mount',
+    reason: 'Operation not supported'
+  });
+
+  assert.match(message, /requires filesystem extended attributes/);
+  assert.match(message, /Operation not supported/);
+  assert.match(message, /rclone\/FUSE typically do not expose the POSIX xattrs/);
+  assert.match(message, /Use depot mode or move the disk to a local filesystem with xattr support/);
 });

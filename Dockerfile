@@ -77,6 +77,7 @@ RUN apt-get update \
     samba-vfs-modules \
     openssh-server \
     rclone \
+    attr \
     fuse3 \
     ca-certificates \
     procps \

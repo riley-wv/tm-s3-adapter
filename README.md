@@ -114,6 +114,8 @@ Per generated Samba share:
 
 The generated root share keeps macOS-compatible fruit settings but is not advertised as a Time Machine target.
 
+`streams_xattr` only works when the underlying share path supports real filesystem xattrs. Cloud-mounted paths exposed through `rclone mount` usually do not, so the app now fails fast with a clear error instead of advertising a broken `streams_xattr` setup there.
+
 If SMB clients can connect but writes fail with I/O errors, try `VPS_SAMBA_STREAMS_BACKEND=depot`.
 
 If backups fail, prefer validating with a `local` storage-mode disk first, then move to cloud mounts.
