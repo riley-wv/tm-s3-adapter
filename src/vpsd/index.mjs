@@ -2171,7 +2171,7 @@ async function handleAdminApi(req, res, url) {
     }
 
     if (req.method === 'POST' && segments.length === 5 && segments[4] === 'apply-samba') {
-      const { disk } = await assertDiskExists(diskId);
+      const { metadata, disk } = await assertDiskExists(diskId);
       if (!canApplySamba(metadata.settings)) {
         throw Object.assign(new Error('SMB management is disabled in settings'), { statusCode: 400 });
       }
