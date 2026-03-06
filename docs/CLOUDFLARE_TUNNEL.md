@@ -14,6 +14,7 @@ Every command block below is labeled with where to run it:
 - SMB and SFTP are TCP services. Clients must run `cloudflared access tcp` locally to forward TCP traffic.
 - Time Machine over Cloudflare is possible only if the Mac keeps the local TCP forward running while backups execute.
 - Tunnel ownership and device WARP org do not have to match. Access is evaluated by the org that owns the tunnel hostname.
+- For permanent behavior, run `cloudflared` as a system service on the VPS and a persistent startup job on the client for SMB forwarding.
 
 ## Cross-org Zero Trust pattern (one org hosts, another org device)
 
@@ -216,6 +217,19 @@ If TLS decryption is enabled in Org B, add decryption bypass for:
 - `*.cfargotunnel.com`
 - `*.cloudflareaccess.com`
 
+#### C2a) SMB store rule type (network vs HTTP)
+
+For SMB access through this tunnel design:
+
+- Keep SMB as a TCP tunnel target (`tcp://localhost:1445`) and client-side `cloudflared access tcp`.
+- Do not create direct SMB (port 445) internet allow rules from clients to the VPS IP.
+- Do not create an HTTP origin route for SMB; SMB is not exposed as an HTTP service.
+- Keep an Access Self-hosted app for `smb.example.com` (identity/MFA policy still applies).
+- In DNS policies, allow resolution for `smb.example.com`, `*.cfargotunnel.com`, and `*.cloudflareaccess.com`.
+- Keep `smb.example.com` as a proxied Cloudflare DNS record to the tunnel; do not create split-DNS/local overrides to the VPS public IP.
+- If Org B uses default-deny network egress, allow `cloudflared` outbound to Cloudflare on port `443` (and optionally UDP `7844` if your environment permits QUIC).
+- SMB client traffic itself is local (`smb://127.0.0.1:<forwarded-port>`), so it does not require a separate Gateway HTTP rule.
+
 #### C3) Validate cross-org path
 
 Run on: **Client (Laptop)**
@@ -310,6 +324,8 @@ sudo systemctl enable --now cloudflared
 sudo systemctl status cloudflared
 ```
 
+This makes the VPS tunnel persistent across reboots. You do not need to manually run `cloudflared tunnel run` each time.
+
 ## 7. Configure tm-s3-adapter for tunnel-aware URLs
 
 Set in `.env`:
@@ -363,6 +379,56 @@ In Finder -> Connect to Server:
 - `smb://127.0.0.1:4455/<disk-share-name>`
 
 Keep this `cloudflared` process running while Time Machine is using the share.
+
+#### Permanent SMB forward on macOS (launchd)
+
+Use a LaunchAgent so SMB forwarding starts automatically at login and restarts on failure.
+
+Run on: **Client (Laptop)**
+
+```bash
+cat > ~/Library/LaunchAgents/com.example.cloudflared.smb.plist <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.cloudflared.smb</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>exec $(command -v cloudflared) access tcp --hostname smb.example.com --url 127.0.0.1:4455</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/tmp/cloudflared-smb.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/cloudflared-smb.err.log</string>
+</dict>
+</plist>
+EOF
+
+launchctl unload ~/Library/LaunchAgents/com.example.cloudflared.smb.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.example.cloudflared.smb.plist
+launchctl list | grep com.example.cloudflared.smb
+```
+
+If authentication expires:
+- Re-run `cloudflared access login https://smb.example.com`.
+- Restart the LaunchAgent:
+
+Run on: **Client (Laptop)**
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.example.cloudflared.smb.plist
+launchctl load ~/Library/LaunchAgents/com.example.cloudflared.smb.plist
+```
+
+For fewer re-auth prompts, set a longer Access session duration on the SMB Access app policy.
 
 ### SFTP from client
 
