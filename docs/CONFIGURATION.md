@@ -123,6 +123,14 @@ Samba manager internals (advanced):
 - `VPS_SAMBA_INCLUDE_LINE`
 - `VPS_SAMBA_RESTART_CMD`
 
+SFTP drive manager internals (advanced):
+
+- `VPS_SFTP_MANAGE_ENABLED`
+- `VPS_SFTP_GENERATED_CONF`
+- `VPS_SFTP_CHROOT_BASE_DIR`
+- `VPS_SFTP_DRIVE_DIR_NAME`
+- `VPS_SFTP_RESTART_CMD`
+
 Mount manager uses `VPSD_RCLONE_BINARY` as default rclone command.
 
 Optional cache path override:
@@ -232,7 +240,7 @@ Generated shares include:
 - `durable handles = yes`
 - Optional quota as `fruit:time machine max size = <n>G`
 
-The root share (`rootShareName`) is also generated when Samba management is enabled.
+The root share (`rootShareName`) is also generated when Samba management is enabled, but it is not marked as a Time Machine share.
 
 ## Production hardening checklist
 

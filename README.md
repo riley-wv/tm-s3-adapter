@@ -51,6 +51,8 @@ npm run docker:up
 - SMB: `smb://127.0.0.1:${VPS_SMB_PORT:-1445}`
 - SFTP: `sftp://127.0.0.1:${VPS_SFTP_PORT:-2222}`
 
+Drive creation in the dashboard generates both SMB and drive-scoped SFTP credentials/URLs.
+
 5. Health check:
 
 ```bash
@@ -107,6 +109,8 @@ Per generated Samba share:
 - `vfs objects = catia fruit streams_<backend>` (default backend: `xattr`)
 - `force user = root` and `force group = root`
 - Optional quota via `fruit:time machine max size` when `quotaGb > 0`
+
+The generated root share keeps macOS-compatible fruit settings but is not advertised as a Time Machine target.
 
 If SMB clients can connect but writes fail with I/O errors, try `VPS_SAMBA_STREAMS_BACKEND=depot`.
 

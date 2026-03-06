@@ -26,8 +26,13 @@ function normalizeStreamsBackend(value) {
   return 'streams_xattr';
 }
 
-function shareConfig(disk, streamsBackend) {
+function vfsObjects(streamsBackend) {
+  return `catia fruit ${normalizeStreamsBackend(streamsBackend)}`;
+}
+
+export function buildDiskShareConfig(disk, streamsBackend) {
   const quotaLine = Number(disk.quotaGb) > 0 ? `fruit:time machine max size = ${Math.floor(Number(disk.quotaGb))}G\n` : '';
+  const shareVfsObjects = vfsObjects(streamsBackend);
   return `[${disk.smbShareName}]
 path = ${disk.storagePath}
 valid users = ${disk.smbUsername}
@@ -39,8 +44,7 @@ browseable = yes
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = fruit ${streamsBackend} acl_xattr catia 
-fruit:aapl = yes
+vfs objects = ${shareVfsObjects}
 fruit:time machine = yes
 fruit:metadata = stream
 fruit:resource = file
@@ -54,11 +58,11 @@ kernel share modes = no
 posix locking = no
 fruit:locking = none
 spotlight = no
-spotlight backend = elasticsearch
 `;
 }
 
-function rootShareConfig(shareName, path, streamsBackend) {
+export function buildRootShareConfig(shareName, path, streamsBackend) {
+  const shareVfsObjects = vfsObjects(streamsBackend);
   return `[${shareName}]
 path = ${path}
 read only = no
@@ -69,20 +73,13 @@ force group = root
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = fruit ${streamsBackend} acl_xattr catia 
-fruit:aapl = yes
-fruit:time machine = yes
+vfs objects = ${shareVfsObjects}
 fruit:metadata = stream
 fruit:resource = file
 fruit:posix_rename = yes
 fruit:veto_appledouble = no
 fruit:wipe_intentionally_left_blank_rfork = yes
 fruit:delete_empty_adfiles = yes
-durable handles = yes
-kernel oplocks = no
-kernel share modes = no
-posix locking = no
-fruit:locking = none
 spotlight = no
 `;
 }
@@ -147,7 +144,7 @@ export class SambaManager {
     await mkdir(this.confDir, { recursive: true });
     await this.ensureIncludeLine();
     await mkdir(path, { recursive: true });
-    await writeFile(join(this.confDir, '_root.conf'), rootShareConfig(shareName, path, this.streamsBackend), 'utf8');
+    await writeFile(join(this.confDir, '_root.conf'), buildRootShareConfig(shareName, path, this.streamsBackend), 'utf8');
     await this.syncGeneratedConfig();
     await this.restartSamba();
     return { applied: true, share: shareName, path };
@@ -187,7 +184,7 @@ export class SambaManager {
     await runCommand('sh', ['-lc', `chown -R root:root ${shellQuote(disk.storagePath)} && chmod 0770 ${shellQuote(disk.storagePath)}`]).catch(() => {
       // Best-effort in case storagePath is a managed cloud mount with restricted ownership semantics.
     });
-    await writeFile(this.shareFilePath(disk), shareConfig(disk, this.streamsBackend), 'utf8');
+    await writeFile(this.shareFilePath(disk), buildDiskShareConfig(disk, this.streamsBackend), 'utf8');
   }
 
   async syncGeneratedConfig() {

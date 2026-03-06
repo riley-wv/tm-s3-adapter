@@ -13,6 +13,7 @@ import { JsonStore } from '../shared/jsonStore.mjs';
 import { PostgresSettingsStore } from '../shared/postgresSettingsStore.mjs';
 import { SambaManager } from './sambaManager.mjs';
 import { CloudMountManager } from './cloudMountManager.mjs';
+import { SftpManager } from './sftpManager.mjs';
 
 const legacyPort = process.env.VPS_PORT ? Number(process.env.VPS_PORT) : null;
 const dashboardPort = Number(process.env.VPS_ADMIN_DASHBOARD_PORT || legacyPort || 8787);
@@ -110,7 +111,7 @@ const defaultDualSourceSettings = Object.freeze({
 });
 
 const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
-  version: 3,
+  version: 4,
   settings: {
     hostname: '',
     rootShareName: 'timemachine',
@@ -139,6 +140,7 @@ const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
 
 const sambaManager = new SambaManager();
 const mountManager = new CloudMountManager();
+const sftpManager = new SftpManager();
 const sessions = new Map();
 const postgresSettingsStore = new PostgresSettingsStore(postgresBootstrapConfig);
 
@@ -1491,10 +1493,14 @@ function normalizeMetadataShape(metadata) {
         smbShareName: sanitizeShareName(`tm-${diskId}`),
         smbUsername: sanitizeUsername(`tm_${diskId.slice(0, 8)}`),
         smbPassword: randomPassword(),
+        sftpUsername: sanitizeUsername(`sftp_${diskId.slice(0, 8)}`),
+        sftpPassword: randomPassword(),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         smbLastAppliedAt: null,
-        smbLastAppliedError: null
+        smbLastAppliedError: null,
+        sftpLastAppliedAt: null,
+        sftpLastAppliedError: null
       };
       changed = true;
       continue;
@@ -1555,6 +1561,14 @@ function normalizeMetadataShape(metadata) {
       disk.smbPassword = randomPassword();
       changed = true;
     }
+    if (!disk.sftpUsername) {
+      disk.sftpUsername = sanitizeUsername(`sftp_${disk.id.slice(0, 8)}`);
+      changed = true;
+    }
+    if (!disk.sftpPassword) {
+      disk.sftpPassword = randomPassword();
+      changed = true;
+    }
     if (!disk.createdAt) {
       disk.createdAt = new Date().toISOString();
       changed = true;
@@ -1571,15 +1585,23 @@ function normalizeMetadataShape(metadata) {
       disk.smbLastAppliedError = null;
       changed = true;
     }
+    if (disk.sftpLastAppliedAt === undefined) {
+      disk.sftpLastAppliedAt = null;
+      changed = true;
+    }
+    if (disk.sftpLastAppliedError === undefined) {
+      disk.sftpLastAppliedError = null;
+      changed = true;
+    }
   }
 
-  if (!metadata.version || metadata.version < 3) {
+  if (!metadata.version || metadata.version < 4) {
     // Pre-existing installs with drives already configured skip the setup wizard automatically.
     if (Object.keys(metadata.disks || {}).length > 0 && !metadata.settings.setupCompleted) {
       metadata.settings.setupCompleted = true;
       changed = true;
     }
-    metadata.version = 3;
+    metadata.version = 4;
     changed = true;
   }
 
@@ -1842,11 +1864,16 @@ function buildSettingsResponse(settings) {
   };
 }
 
-function sftpConnectionInfo(host, settings) {
+function normalizedServerWithPort(host, port, defaultPort) {
   const server = host || '<server>';
   const needsIpv6Brackets = server.includes(':') && !server.startsWith('[');
   const normalizedServer = needsIpv6Brackets ? `[${server}]` : server;
-  const serverWithPort = sftpPort === 22 ? normalizedServer : `${normalizedServer}:${sftpPort}`;
+  const serverWithPort = port === defaultPort ? normalizedServer : `${normalizedServer}:${port}`;
+  return { server, serverWithPort };
+}
+
+function sftpConnectionInfo(host, settings) {
+  const { server, serverWithPort } = normalizedServerWithPort(host, sftpPort, 22);
   return {
     enabled: isSftpFeatureEnabled(settings),
     host: server,
@@ -1854,20 +1881,29 @@ function sftpConnectionInfo(host, settings) {
     username: sftpUsername,
     password: sftpPassword,
     rootPath: sftpRootPath,
-    url: `sftp://${serverWithPort}${sftpRootPath}`
+    url: `sftp://${serverWithPort}${sftpRootPath}`,
+    drivePath: sftpManager.visibleDrivePath(),
+    manager: sftpManager.status()
   };
 }
 
 function buildSmbUrls(host, settings, disk) {
-  const server = host || '<server>';
   const port = effectiveSmbPublicPort(settings);
-  const needsIpv6Brackets = server.includes(':') && !server.startsWith('[');
-  const normalizedServer = needsIpv6Brackets ? `[${server}]` : server;
-  const serverWithPort = port === 445 ? normalizedServer : `${normalizedServer}:${port}`;
+  const { serverWithPort } = normalizedServerWithPort(host, port, 445);
   return {
     rootShareUrl: `smb://${serverWithPort}/${settings.rootShareName}`,
     diskShareUrl: `smb://${serverWithPort}/${disk.smbShareName}`,
     rootSubdirUrl: `smb://${serverWithPort}/${settings.rootShareName}/${disk.id}`
+  };
+}
+
+function buildSftpUrls(host, settings, disk) {
+  const { serverWithPort } = normalizedServerWithPort(host, sftpPort, 22);
+  const drivePath = sftpManager.visibleDrivePath();
+  return {
+    sftpUrl: `sftp://${encodeURIComponent(disk.sftpUsername)}@${serverWithPort}${drivePath}`,
+    sftpPath: drivePath,
+    sftpEnabled: isSftpFeatureEnabled(settings)
   };
 }
 
@@ -1920,7 +1956,8 @@ function resolveStoragePath(payload, diskId, metadata) {
 function diskForResponse(disk, settings, host) {
   return {
     ...disk,
-    ...buildSmbUrls(host, settings, disk)
+    ...buildSmbUrls(host, settings, disk),
+    ...buildSftpUrls(host, settings, disk)
   };
 }
 
@@ -1945,6 +1982,26 @@ async function ensureDiskShareApplied(disk, settings) {
   const result = await sambaManager.applyDisk(disk);
   const rootResult = await sambaManager.applyRootShare(settings.rootShareName, smbShareRoot);
   return { disk: result, root: rootResult };
+}
+
+function hasSftpDiskConfig(disk) {
+  return Boolean(
+    disk &&
+    typeof disk.sftpUsername === 'string' &&
+    disk.sftpUsername &&
+    typeof disk.sftpPassword === 'string' &&
+    disk.sftpPassword &&
+    typeof disk.storagePath === 'string' &&
+    disk.storagePath
+  );
+}
+
+async function ensureDiskSftpApplied(disk, metadata) {
+  if (!hasSftpDiskConfig(disk)) {
+    throw new Error(`Disk ${disk?.id || '<unknown>'} is missing SFTP configuration fields`);
+  }
+  const allDisks = Object.values(metadata?.disks || {});
+  return sftpManager.applyDisk(disk, allDisks);
 }
 
 async function applyAllDiskSharesOnStartup(metadata) {
@@ -1985,6 +2042,45 @@ async function applyAllDiskSharesOnStartup(metadata) {
       }
       disk.smbLastAppliedAt = now;
       disk.smbLastAppliedError = result.applied ? null : result.error || 'Not applied';
+    }
+    return draft;
+  });
+}
+
+async function applyAllDiskSftpOnStartup(metadata) {
+  if (!sftpManager.enabled) {
+    return;
+  }
+
+  const applyResults = {};
+  const now = new Date().toISOString();
+  for (const [diskId, disk] of Object.entries(metadata.disks || {})) {
+    if (!hasSftpDiskConfig(disk)) {
+      applyResults[diskId] = { applied: false, error: 'Disk is missing SFTP configuration fields' };
+      continue;
+    }
+
+    try {
+      await ensureDiskStoragePathReady(disk, metadata.settings);
+      applyResults[diskId] = await sftpManager.applyDisk(disk, Object.values(metadata.disks || {}));
+    } catch (error) {
+      applyResults[diskId] = { applied: false, error: error.message };
+      console.error(`Failed to apply sftp config for disk ${diskId}:`, error.message);
+    }
+  }
+
+  if (Object.keys(applyResults).length === 0) {
+    return;
+  }
+
+  await updateMetadata((draft) => {
+    for (const [diskId, result] of Object.entries(applyResults)) {
+      const disk = draft.disks[diskId];
+      if (!disk) {
+        continue;
+      }
+      disk.sftpLastAppliedAt = now;
+      disk.sftpLastAppliedError = result.applied ? null : result.error || 'Not applied';
     }
     return draft;
   });
@@ -2781,11 +2877,19 @@ async function handleAdminApi(req, res, url) {
         smbShareName: shareName,
         smbUsername: sanitizeUsername(payload.smbUsername || `tm_${diskId.slice(0, 8)}`),
         smbPassword: payload.smbPassword || randomPassword(),
+        sftpUsername: sanitizeUsername(payload.sftpUsername || `sftp_${diskId.slice(0, 8)}`),
+        sftpPassword: payload.sftpPassword || randomPassword(),
         createdAt: now,
         updatedAt: now,
         smbLastAppliedAt: null,
-        smbLastAppliedError: null
+        smbLastAppliedError: null,
+        sftpLastAppliedAt: null,
+        sftpLastAppliedError: null
       };
+      const sftpUserExists = Object.values(draft.disks).some((disk) => disk.id !== diskId && disk.sftpUsername === draft.disks[diskId].sftpUsername);
+      if (sftpUserExists) {
+        throw Object.assign(new Error(`SFTP username already in use: ${draft.disks[diskId].sftpUsername}`), { statusCode: 409 });
+      }
 
       return draft;
     });
@@ -2813,6 +2917,18 @@ async function handleAdminApi(req, res, url) {
         return draft;
       });
     }
+    if (payload.applySftp !== false && isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
+      const applyResult = await ensureDiskSftpApplied(disk, metadata);
+      await updateMetadata((draft) => {
+        const current = draft.disks[diskId];
+        if (!current) {
+          return draft;
+        }
+        current.sftpLastAppliedAt = new Date().toISOString();
+        current.sftpLastAppliedError = applyResult.applied ? null : applyResult.reason || 'Not applied';
+        return draft;
+      });
+    }
 
     appendLog({
       source: 'admin',
@@ -2834,6 +2950,11 @@ async function handleAdminApi(req, res, url) {
 
     if (req.method === 'PUT' && segments.length === 4) {
       const payload = await readJsonBody(req);
+      const previousMetadata = await loadMetadata();
+      const previousDisk = previousMetadata.disks[diskId];
+      if (!previousDisk) {
+        throw Object.assign(new Error(`Unknown disk id: ${diskId}`), { statusCode: 404 });
+      }
       const metadata = await updateMetadata((draft) => {
         const disk = draft.disks[diskId];
         if (!disk) {
@@ -2856,6 +2977,14 @@ async function handleAdminApi(req, res, url) {
         }
         if (payload.smbUsername !== undefined) {
           disk.smbUsername = sanitizeUsername(payload.smbUsername);
+        }
+        if (payload.sftpUsername !== undefined) {
+          const nextSftpUsername = sanitizeUsername(payload.sftpUsername);
+          const sftpExists = Object.values(draft.disks).some((other) => other.id !== diskId && other.sftpUsername === nextSftpUsername);
+          if (sftpExists) {
+            throw Object.assign(new Error(`SFTP username already in use: ${nextSftpUsername}`), { statusCode: 409 });
+          }
+          disk.sftpUsername = nextSftpUsername;
         }
         if (payload.storageMode || payload.storagePath || payload.storageSubdir) {
           const storage = resolveStoragePath(
@@ -2885,6 +3014,21 @@ async function handleAdminApi(req, res, url) {
       await ensureDiskStoragePathReady(disk, metadata.settings);
       if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
         await ensureDiskShareApplied(disk, metadata.settings);
+      }
+      if (payload.applySftp !== false && isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
+        const result = await ensureDiskSftpApplied(disk, metadata);
+        if (previousDisk.sftpUsername !== disk.sftpUsername) {
+          await sftpManager.deleteUser(previousDisk.sftpUsername).catch(() => { });
+        }
+        await updateMetadata((draft) => {
+          const current = draft.disks[diskId];
+          if (!current) {
+            return draft;
+          }
+          current.sftpLastAppliedAt = new Date().toISOString();
+          current.sftpLastAppliedError = result.applied ? null : result.reason || 'Not applied';
+          return draft;
+        });
       }
 
       sendJson(res, 200, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
@@ -2941,6 +3085,53 @@ async function handleAdminApi(req, res, url) {
       return;
     }
 
+    if (req.method === 'POST' && segments.length === 5 && segments[4] === 'sftp-password') {
+      const payload = await readJsonBody(req);
+      const nextPassword = payload.password || randomPassword();
+
+      const metadata = await updateMetadata((draft) => {
+        const disk = draft.disks[diskId];
+        if (!disk) {
+          throw Object.assign(new Error(`Unknown disk id: ${diskId}`), { statusCode: 404 });
+        }
+
+        disk.sftpPassword = nextPassword;
+        disk.updatedAt = new Date().toISOString();
+        return draft;
+      });
+
+      const disk = metadata.disks[diskId];
+      const result = isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled
+        ? await ensureDiskSftpApplied(disk, metadata)
+        : { applied: false, reason: 'SFTP management is disabled in settings' };
+      await updateMetadata((draft) => {
+        const current = draft.disks[diskId];
+        if (!current) {
+          return draft;
+        }
+        current.sftpLastAppliedAt = isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled ? new Date().toISOString() : current.sftpLastAppliedAt;
+        current.sftpLastAppliedError = result.applied ? null : result.reason || 'Not applied';
+        return draft;
+      });
+
+      sendJson(res, 200, {
+        ok: true,
+        sftpUsername: disk.sftpUsername,
+        sftpPassword: nextPassword,
+        applied: result
+      });
+      appendLog({
+        source: 'admin',
+        level: 'info',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: `Rotated SFTP password for drive "${diskId}"`,
+        path: url.pathname,
+        method: req.method
+      });
+      return;
+    }
+
     if (req.method === 'POST' && segments.length === 5 && segments[4] === 'apply-samba') {
       const { metadata, disk } = await assertDiskExists(diskId);
       if (!canApplySamba(metadata.settings)) {
@@ -2971,13 +3162,43 @@ async function handleAdminApi(req, res, url) {
       return;
     }
 
+    if (req.method === 'POST' && segments.length === 5 && segments[4] === 'apply-sftp') {
+      const { metadata, disk } = await assertDiskExists(diskId);
+      if (!isSftpFeatureEnabled(metadata.settings) || !sftpManager.enabled) {
+        throw Object.assign(new Error('SFTP management is disabled in settings'), { statusCode: 400 });
+      }
+      const result = await ensureDiskSftpApplied(disk, metadata);
+      await updateMetadata((draft) => {
+        const current = draft.disks[diskId];
+        if (!current) {
+          return draft;
+        }
+        current.sftpLastAppliedAt = new Date().toISOString();
+        current.sftpLastAppliedError = result.applied ? null : result.reason || 'Not applied';
+        return draft;
+      });
+      appendLog({
+        source: 'admin',
+        level: result?.applied ? 'info' : 'warning',
+        host: requestClientHost(req),
+        drive: diskId,
+        message: result?.applied
+          ? `Applied SFTP settings for drive "${diskId}"`
+          : `Failed to fully apply SFTP settings for drive "${diskId}"`,
+        path: url.pathname,
+        method: req.method
+      });
+      sendJson(res, 200, { result });
+      return;
+    }
+
     if (req.method === 'DELETE' && segments.length === 4) {
       const payload = await readJsonBody(req).catch(() => ({}));
       const deleteData = Boolean(payload.deleteData);
 
       const { metadata, disk } = await assertDiskExists(diskId);
 
-      await updateMetadata((draft) => {
+      const updatedMetadata = await updateMetadata((draft) => {
         delete draft.disks[diskId];
         return draft;
       });
@@ -2990,8 +3211,13 @@ async function handleAdminApi(req, res, url) {
         await sambaManager.removeDisk(disk).catch((error) => {
           console.error('Failed to remove samba share:', error.message);
         });
-        await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
+        await sambaManager.applyRootShare(updatedMetadata.settings.rootShareName, smbShareRoot).catch((error) => {
           console.error('Failed to apply root share:', error.message);
+        });
+      }
+      if (sftpManager.enabled) {
+        await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch((error) => {
+          console.error('Failed to remove sftp drive config:', error.message);
         });
       }
 
@@ -3018,8 +3244,9 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/disks') {
     const metadata = await loadMetadata();
+    const host = requestHost(req, metadata);
     sendJson(res, 200, {
-      disks: Object.values(metadata.disks)
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
     });
     return;
   }
@@ -3027,13 +3254,22 @@ async function handleApi(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/smb') {
     const metadata = await loadMetadata();
     const host = requestHost(req, metadata);
-    const port = effectiveSmbPublicPort(metadata.settings);
-    const hostWithPort = port === 445 ? (host || '<server>') : `${host || '<server>'}:${port}`;
+    const { serverWithPort } = normalizedServerWithPort(host, effectiveSmbPublicPort(metadata.settings), 445);
     sendJson(res, 200, {
       smbShareRoot,
       smbEnabled: isSmbFeatureEnabled(metadata.settings),
       rootShareName: metadata.settings.rootShareName,
-      rootShareUrl: `smb://${hostWithPort}/${metadata.settings.rootShareName}`,
+      rootShareUrl: `smb://${serverWithPort}/${metadata.settings.rootShareName}`,
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/sftp') {
+    const metadata = await loadMetadata();
+    const host = requestHost(req, metadata);
+    sendJson(res, 200, {
+      ...sftpConnectionInfo(host, metadata.settings),
       disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
     });
     return;
@@ -3069,11 +3305,19 @@ async function handleApi(req, res, url) {
         smbShareName: sanitizeShareName(payload.shareName || `tm-${diskId.slice(0, 6)}`),
         smbUsername: sanitizeUsername(payload.smbUsername || `tm_${diskId.slice(0, 8)}`),
         smbPassword: payload.smbPassword || randomPassword(),
+        sftpUsername: sanitizeUsername(payload.sftpUsername || `sftp_${diskId.slice(0, 8)}`),
+        sftpPassword: payload.sftpPassword || randomPassword(),
         createdAt: now,
         updatedAt: now,
         smbLastAppliedAt: null,
-        smbLastAppliedError: null
+        smbLastAppliedError: null,
+        sftpLastAppliedAt: null,
+        sftpLastAppliedError: null
       };
+      const sftpUserExists = Object.values(draft.disks).some((disk) => disk.id !== diskId && disk.sftpUsername === draft.disks[diskId].sftpUsername);
+      if (sftpUserExists) {
+        throw Object.assign(new Error(`SFTP username already in use: ${draft.disks[diskId].sftpUsername}`), { statusCode: 409 });
+      }
       return draft;
     });
 
@@ -3091,6 +3335,9 @@ async function handleApi(req, res, url) {
     if (payload.applySamba === true && canApplySamba(metadata.settings)) {
       await ensureDiskShareApplied(disk, metadata.settings);
     }
+    if (payload.applySftp === true && isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
+      await ensureDiskSftpApplied(disk, metadata);
+    }
 
     appendLog({
       source: 'api',
@@ -3102,7 +3349,7 @@ async function handleApi(req, res, url) {
       method: req.method
     });
 
-    sendJson(res, 201, { disk });
+    sendJson(res, 201, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
     return;
   }
 
@@ -3115,12 +3362,19 @@ async function handleApi(req, res, url) {
       const deleteData = payload.deleteData !== false;
 
       const { metadata, disk } = await assertDiskExists(diskId);
-      await updateMetadata((draft) => {
+      const updatedMetadata = await updateMetadata((draft) => {
         delete draft.disks[diskId];
         return draft;
       });
       if (deleteData) {
         await deleteDiskFilesDir(disk);
+      }
+      if (canApplySamba(metadata.settings)) {
+        await sambaManager.removeDisk(disk).catch(() => { });
+        await sambaManager.applyRootShare(updatedMetadata.settings.rootShareName, smbShareRoot).catch(() => { });
+      }
+      if (sftpManager.enabled) {
+        await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch(() => { });
       }
       appendLog({
         source: 'api',
@@ -3277,6 +3531,11 @@ async function main() {
     });
     await applyAllDiskSharesOnStartup(metadata).catch((error) => {
       console.error('Failed to apply samba shares on startup:', error.message);
+    });
+  }
+  if (isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
+    await applyAllDiskSftpOnStartup(metadata).catch((error) => {
+      console.error('Failed to apply sftp drive config on startup:', error.message);
     });
   }
 

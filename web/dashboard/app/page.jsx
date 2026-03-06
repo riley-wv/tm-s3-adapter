@@ -12,7 +12,10 @@ const DEFAULT_DISK_FORM = {
   shareName: '',
   smbUsername: '',
   smbPassword: '',
-  applySamba: true
+  sftpUsername: '',
+  sftpPassword: '',
+  applySamba: true,
+  applySftp: true
 };
 
 const DEFAULT_MOUNT_FORM = {
@@ -1191,6 +1194,16 @@ export default function DashboardPage() {
       `Storage Path: ${disk.storagePath || ''}`
     ].join('\n');
 
+  const sftpConfigTextForDisk = (disk) =>
+    [
+      `Drive: ${disk.name}`,
+      `URL: ${disk.sftpUrl || ''}`,
+      `Path: ${disk.sftpPath || ''}`,
+      `Username: ${disk.sftpUsername || ''}`,
+      `Password: ${disk.sftpPassword || ''}`,
+      `Storage Path: ${disk.storagePath || ''}`
+    ].join('\n');
+
   const startEditDisk = (disk) => {
     const mount = disk.storageMountId ? mountById.get(disk.storageMountId) : null;
     setEditingDiskId(disk.id);
@@ -1204,7 +1217,10 @@ export default function DashboardPage() {
       shareName: disk.smbShareName || '',
       smbUsername: disk.smbUsername || '',
       smbPassword: disk.smbPassword || '',
-      applySamba: true
+      sftpUsername: disk.sftpUsername || '',
+      sftpPassword: disk.sftpPassword || '',
+      applySamba: true,
+      applySftp: true
     });
   };
 
@@ -1231,7 +1247,9 @@ export default function DashboardPage() {
         quotaGb: Number(editingDiskForm.quotaGb || 0),
         smbShareName: editingDiskForm.shareName.trim() || undefined,
         smbUsername: editingDiskForm.smbUsername.trim() || undefined,
-        applySamba: settingsForm.smbEnabled && editingDiskForm.applySamba
+        sftpUsername: editingDiskForm.sftpUsername.trim() || undefined,
+        applySamba: settingsForm.smbEnabled && editingDiskForm.applySamba,
+        applySftp: settingsForm.sftpEnabled && editingDiskForm.applySftp
       };
 
       if (editingDiskForm.storageMode) {
@@ -1259,6 +1277,16 @@ export default function DashboardPage() {
         await api(`/admin/api/disks/${editingDiskId}/password`, {
           method: 'POST',
           body: JSON.stringify({ password: editingDiskForm.smbPassword })
+        });
+      }
+
+      if (editingDiskForm.sftpPassword !== currentDisk.sftpPassword) {
+        if (!editingDiskForm.sftpPassword) {
+          throw new Error('SFTP password cannot be empty');
+        }
+        await api(`/admin/api/disks/${editingDiskId}/sftp-password`, {
+          method: 'POST',
+          body: JSON.stringify({ password: editingDiskForm.sftpPassword })
         });
       }
 
@@ -1343,7 +1371,10 @@ export default function DashboardPage() {
         shareName: diskForm.shareName.trim() || undefined,
         smbUsername: diskForm.smbUsername.trim() || undefined,
         smbPassword: diskForm.smbPassword || undefined,
-        applySamba: settingsForm.smbEnabled && diskForm.applySamba
+        sftpUsername: diskForm.sftpUsername.trim() || undefined,
+        sftpPassword: diskForm.sftpPassword || undefined,
+        applySamba: settingsForm.smbEnabled && diskForm.applySamba,
+        applySftp: settingsForm.sftpEnabled && diskForm.applySftp
       };
 
       if (diskForm.storageMode === 'cloud-mount') {
@@ -1376,12 +1407,28 @@ export default function DashboardPage() {
         setNotice(`Password rotated for ${diskId}`);
       }
 
+      if (action === 'rotate-sftp') {
+        await api(`/admin/api/disks/${diskId}/sftp-password`, {
+          method: 'POST',
+          body: '{}'
+        });
+        setNotice(`SFTP password rotated for ${diskId}`);
+      }
+
       if (action === 'apply') {
         await api(`/admin/api/disks/${diskId}/apply-samba`, {
           method: 'POST',
           body: '{}'
         });
         setNotice(`Samba configuration applied for ${diskId}`);
+      }
+
+      if (action === 'apply-sftp') {
+        await api(`/admin/api/disks/${diskId}/apply-sftp`, {
+          method: 'POST',
+          body: '{}'
+        });
+        setNotice(`SFTP configuration applied for ${diskId}`);
       }
 
       if (action === 'delete') {
@@ -2233,6 +2280,28 @@ export default function DashboardPage() {
                         placeholder="Auto-generated if empty"
                       />
                     </div>
+
+                    <div className="form-group">
+                      <label htmlFor="disk-sftp-user">SFTP Username</label>
+                      <input
+                        id="disk-sftp-user"
+                        type="text"
+                        value={diskForm.sftpUsername}
+                        onChange={(e) => setDiskForm((prev) => ({ ...prev, sftpUsername: e.target.value }))}
+                        placeholder="Auto-generated if empty"
+                      />
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="disk-sftp-pass">SFTP Password</label>
+                      <input
+                        id="disk-sftp-pass"
+                        type="text"
+                        value={diskForm.sftpPassword}
+                        onChange={(e) => setDiskForm((prev) => ({ ...prev, sftpPassword: e.target.value }))}
+                        placeholder="Auto-generated if empty"
+                      />
+                    </div>
                   </div>
 
                   <div className="checkbox-group">
@@ -2244,6 +2313,18 @@ export default function DashboardPage() {
                     />
                     <span onClick={() => setDiskForm((prev) => ({ ...prev, applySamba: !prev.applySamba }))}>
                       Apply Samba configuration immediately
+                    </span>
+                  </div>
+
+                  <div className="checkbox-group">
+                    <input
+                      type="checkbox"
+                      id="disk-apply-sftp"
+                      checked={diskForm.applySftp}
+                      onChange={(e) => setDiskForm((prev) => ({ ...prev, applySftp: e.target.checked }))}
+                    />
+                    <span onClick={() => setDiskForm((prev) => ({ ...prev, applySftp: !prev.applySftp }))}>
+                      Apply SFTP configuration immediately
                     </span>
                   </div>
 
@@ -2392,6 +2473,28 @@ export default function DashboardPage() {
                                 required
                               />
                             </div>
+
+                            <div className="form-group">
+                              <label htmlFor={`edit-disk-sftp-user-${disk.id}`}>SFTP Username</label>
+                              <input
+                                id={`edit-disk-sftp-user-${disk.id}`}
+                                type="text"
+                                value={editingDiskForm.sftpUsername}
+                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, sftpUsername: e.target.value }))}
+                                required
+                              />
+                            </div>
+
+                            <div className="form-group">
+                              <label htmlFor={`edit-disk-sftp-pass-${disk.id}`}>SFTP Password</label>
+                              <input
+                                id={`edit-disk-sftp-pass-${disk.id}`}
+                                type="text"
+                                value={editingDiskForm.sftpPassword}
+                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, sftpPassword: e.target.value }))}
+                                required
+                              />
+                            </div>
                           </div>
 
                           <div className="checkbox-group">
@@ -2403,6 +2506,18 @@ export default function DashboardPage() {
                             />
                             <span onClick={() => setEditingDiskForm((prev) => ({ ...prev, applySamba: !prev.applySamba }))}>
                               Apply Samba configuration immediately
+                            </span>
+                          </div>
+
+                          <div className="checkbox-group">
+                            <input
+                              type="checkbox"
+                              id={`edit-disk-apply-sftp-${disk.id}`}
+                              checked={editingDiskForm.applySftp}
+                              onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, applySftp: e.target.checked }))}
+                            />
+                            <span onClick={() => setEditingDiskForm((prev) => ({ ...prev, applySftp: !prev.applySftp }))}>
+                              Apply SFTP configuration immediately
                             </span>
                           </div>
 
@@ -2419,20 +2534,36 @@ export default function DashboardPage() {
                         <>
                           <div className="info-grid">
                             <div className="info-item">
-                              <div className="label">Share URL</div>
+                              <div className="label">SMB URL</div>
                               <div className="value">{disk.diskShareUrl || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">Root URL</div>
+                              <div className="label">SMB Root URL</div>
                               <div className="value">{disk.rootShareUrl || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">Username</div>
+                              <div className="label">SMB Username</div>
                               <div className="value">{disk.smbUsername || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">Password</div>
+                              <div className="label">SMB Password</div>
                               <div className="value">{disk.smbPassword || 'N/A'}</div>
+                            </div>
+                            <div className="info-item">
+                              <div className="label">SFTP URL</div>
+                              <div className="value">{disk.sftpUrl || 'N/A'}</div>
+                            </div>
+                            <div className="info-item">
+                              <div className="label">SFTP Path</div>
+                              <div className="value">{disk.sftpPath || 'N/A'}</div>
+                            </div>
+                            <div className="info-item">
+                              <div className="label">SFTP Username</div>
+                              <div className="value">{disk.sftpUsername || 'N/A'}</div>
+                            </div>
+                            <div className="info-item">
+                              <div className="label">SFTP Password</div>
+                              <div className="value">{disk.sftpPassword || 'N/A'}</div>
                             </div>
                             <div className="info-item">
                               <div className="label">Storage Path</div>
@@ -2444,20 +2575,35 @@ export default function DashboardPage() {
                             <button className="btn sm" onClick={() => copyToClipboard('SMB config', smbConfigTextForDisk(disk))} type="button">
                               Copy SMB Config
                             </button>
+                            <button className="btn sm" onClick={() => copyToClipboard('SFTP config', sftpConfigTextForDisk(disk))} type="button">
+                              Copy SFTP Config
+                            </button>
                             <button className="btn sm" onClick={() => copyToClipboard('SMB URL', disk.diskShareUrl)} type="button">
                               Copy URL
+                            </button>
+                            <button className="btn sm" onClick={() => copyToClipboard('SFTP URL', disk.sftpUrl)} type="button">
+                              Copy SFTP URL
                             </button>
                             <button className="btn sm" onClick={() => copyToClipboard('SMB username', disk.smbUsername)} type="button">
                               Copy Username
                             </button>
+                            <button className="btn sm" onClick={() => copyToClipboard('SFTP username', disk.sftpUsername)} type="button">
+                              Copy SFTP Username
+                            </button>
                             <button className="btn sm" onClick={() => copyToClipboard('SMB password', disk.smbPassword)} type="button">
                               Copy Password
+                            </button>
+                            <button className="btn sm" onClick={() => copyToClipboard('SFTP password', disk.sftpPassword)} type="button">
+                              Copy SFTP Password
                             </button>
                             <button className="btn sm" onClick={() => startEditDisk(disk)} disabled={submitting}>
                               Edit
                             </button>
                             <button className="btn sm" onClick={() => handleDiskAction(disk.id, 'rotate')} disabled={submitting}>
-                              <Icon name="key" /> Rotate Password
+                              <Icon name="key" /> Rotate SMB Password
+                            </button>
+                            <button className="btn sm" onClick={() => handleDiskAction(disk.id, 'rotate-sftp')} disabled={submitting}>
+                              <Icon name="key" /> Rotate SFTP Password
                             </button>
                             <button
                               className="btn sm"
@@ -2465,6 +2611,13 @@ export default function DashboardPage() {
                               disabled={submitting || dashboard?.settings?.smbEnabled === false}
                             >
                               <Icon name="apply" /> Apply Samba
+                            </button>
+                            <button
+                              className="btn sm"
+                              onClick={() => handleDiskAction(disk.id, 'apply-sftp')}
+                              disabled={submitting || dashboard?.settings?.sftpEnabled === false}
+                            >
+                              <Icon name="apply" /> Apply SFTP
                             </button>
                             <button className="btn sm danger" onClick={() => handleDiskAction(disk.id, 'delete')} disabled={submitting}>
                               <Icon name="delete" /> Delete

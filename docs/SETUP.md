@@ -106,7 +106,8 @@ This generates:
 
 - SMB share name
 - SMB username/password
-- `diskShareUrl` and root/subdir URLs
+- SFTP username/password
+- `diskShareUrl`, root/subdir URLs, and drive-scoped `sftpUrl`
 
 ## 6. Connect from macOS Finder
 

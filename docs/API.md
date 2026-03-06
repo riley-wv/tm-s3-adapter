@@ -73,8 +73,12 @@ Mount deletion fails if any disk still references the mount.
   - Update disk fields and storage mapping
 - `POST /admin/api/disks/:diskId/password`
   - Rotate SMB password (custom or auto-generated)
+- `POST /admin/api/disks/:diskId/sftp-password`
+  - Rotate SFTP password (custom or auto-generated)
 - `POST /admin/api/disks/:diskId/apply-samba`
   - Re-apply Samba user/share config
+- `POST /admin/api/disks/:diskId/apply-sftp`
+  - Re-apply drive-scoped SFTP user/chroot config
 - `DELETE /admin/api/disks/:diskId`
   - Body optional: `{"deleteData":true}`
 
@@ -107,6 +111,8 @@ Terminal session API:
   - Optional body `{"deleteData":true|false}` (defaults to true)
 - `GET /api/smb`
   - Root SMB details and disk URLs
+- `GET /api/sftp`
+  - Root SFTP details and per-disk drive URLs
 - `GET /api/disks/:diskId/files?prefix=...`
   - Recursive file listing
 - `PUT /api/disks/:diskId/file?path=<rel>&mtimeMs=<ms>`

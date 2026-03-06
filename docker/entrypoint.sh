@@ -23,8 +23,9 @@ fi
 
 if id "${VPS_SFTP_USERNAME}" >/dev/null 2>&1; then
   usermod --home "${VPS_DATA_DIR}" --uid "${VPS_SFTP_UID}" --gid "${sftp_group}" "${VPS_SFTP_USERNAME}"
+  usermod -a -G root "${VPS_SFTP_USERNAME}"
 else
-  useradd --home "${VPS_DATA_DIR}" --uid "${VPS_SFTP_UID}" --gid "${sftp_group}" --shell /usr/sbin/nologin --no-create-home "${VPS_SFTP_USERNAME}"
+  useradd --home "${VPS_DATA_DIR}" --uid "${VPS_SFTP_UID}" --gid "${sftp_group}" --groups root --shell /usr/sbin/nologin --no-create-home "${VPS_SFTP_USERNAME}"
 fi
 
 echo "${VPS_SFTP_USERNAME}:${VPS_SFTP_PASSWORD}" | chpasswd

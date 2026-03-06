@@ -13,7 +13,7 @@
    smb ports = 445
    server min protocol = SMB2
    ea support = yes
-   vfs objects = fruit streams_xattr acl_xattr catia 
+   vfs objects = fruit streams_xattr
    fruit:aapl = yes
    fruit:nfs_aces = no
    fruit:metadata = stream
@@ -24,9 +24,3 @@
    fruit:delete_empty_adfiles = yes
    fruit:zero_file_id = yes
    include = /etc/samba/smb.conf.d/tm-adapter/_generated.conf
-   min protocol = SMB2 
-   ea support = yes
-
-[TimeMachineBackup]
-vfs objects = fruit streams_xattr
-fruit:time machine = yes
