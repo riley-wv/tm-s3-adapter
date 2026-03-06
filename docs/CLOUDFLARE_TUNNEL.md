@@ -5,7 +5,7 @@ This setup is optional. `tm-s3-adapter` works fine without Cloudflare Tunnel.
 Use this if you want to keep host ports bound to `127.0.0.1` and expose access through Cloudflare Zero Trust.
 
 Every command block below is labeled with where to run it:
-- **Server (VPS)** = your DigitalOcean/Linux host
+- **Server (VPS)** = your OVH/Linux host
 - **Client (Laptop)** = your Mac/desktop used to access the services
 
 ## Important notes
@@ -19,8 +19,8 @@ Every command block below is labeled with where to run it:
 
 Example:
 
-- Tunnel/server org: `Webb Ventures` (owns DNS, tunnel, Access apps)
-- Device org: `Greenroom` (laptop remains connected to Greenroom WARP)
+- Tunnel/server org: `Org A` (owns DNS, tunnel, Access apps)
+- Device org: `Org B` (laptop remains connected to Org B WARP)
 
 This is the recommended model when you do not want to move your laptop between WARP orgs.
 
@@ -35,7 +35,7 @@ Laptop (WARP in Org B) -> HTTPS/TCP to Cloudflare Edge
 
 ### Rules that make cross-org work
 
-- Create and run the tunnel in the server org (`Webb Ventures` in this example).
+- Create and run the tunnel in the server org (`Org A` in this example).
 - Create Access applications in that same server org.
 - Authenticate users against identities allowed by server-org Access policies.
 - Do not rely on WARP private-network routes for this server.
@@ -64,6 +64,172 @@ Laptop (WARP in Org B) -> HTTPS/TCP to Cloudflare Edge
 - User identity is valid in IdP, but not included in the server-org Access allow policy.
 - Attempting to use private-network routing (`warp-routing`) instead of hostname + Access for this setup.
 - SMB forward is not running continuously during Time Machine backups.
+
+## Operational playbook for secure access goals
+
+This section provides exact steps for the three common goals:
+
+- Auto login to VPS when using Zero Trust
+- Deny access to VPS when not using Zero Trust
+- Allow access from one Zero Trust org's clients to another Zero Trust org's tunnel apps
+
+### Goal A: Auto login to VPS when using Zero Trust
+
+Target behavior:
+- User does not enter Linux account password.
+- User connects directly to default `ubuntu` account.
+- Cloudflare Access identity check still happens (interactive login only when token/session expires).
+
+#### A1) Configure SSH key auth for `ubuntu`
+
+Run on: **Client (Laptop)**
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/webbvps -C "webbvps"
+```
+
+Run on: **Server (VPS)**
+
+```bash
+sudo mkdir -p /home/ubuntu/.ssh
+sudo chmod 700 /home/ubuntu/.ssh
+sudo touch /home/ubuntu/.ssh/authorized_keys
+sudo chmod 600 /home/ubuntu/.ssh/authorized_keys
+sudo chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+```
+
+Append the client public key (`~/.ssh/webbvps.pub`) to `/home/ubuntu/.ssh/authorized_keys`.
+
+#### A2) Disable password SSH login on VPS
+
+Run on: **Server (VPS)**
+
+```bash
+sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
+sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?KbdInteractiveAuthentication.*/KbdInteractiveAuthentication no/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sudo systemctl restart ssh
+```
+
+#### A3) Configure SSH client for tunnel + default ubuntu user
+
+Run on: **Client (Laptop)**
+
+```bash
+cat >> ~/.ssh/config <<'EOF'
+Host webbvps
+  HostName ssh.vps.example.com
+  User ubuntu
+  IdentityFile ~/.ssh/webbvps
+  IdentitiesOnly yes
+  ProxyCommand cloudflared access ssh --hostname %h
+EOF
+chmod 600 ~/.ssh/config
+```
+
+Connect:
+
+Run on: **Client (Laptop)**
+
+```bash
+ssh webbvps
+```
+
+### Goal B: Deny access to VPS when not using Zero Trust
+
+Target behavior:
+- Public internet cannot reach SSH/SMB/SFTP/Admin API directly on VPS IP.
+- Only Cloudflare Tunnel path can reach services.
+
+#### B1) Keep services local-only on host
+
+This repo already maps container ports to `127.0.0.1` in `docker-compose.yml`.
+
+#### B2) Block all inbound traffic on VPS
+
+Run on: **Server (VPS)**
+
+```bash
+sudo ufw --force reset
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow in on lo
+sudo ufw enable
+sudo ufw status verbose
+```
+
+#### B3) Make host SSH tunnel-only
+
+Run on: **Server (VPS)**
+
+```bash
+sudo tee /etc/ssh/sshd_config.d/99-tunnel-only.conf >/dev/null <<'EOF'
+ListenAddress 127.0.0.1
+PasswordAuthentication no
+PermitRootLogin no
+PubkeyAuthentication yes
+EOF
+sudo systemctl restart ssh
+```
+
+#### B4) Remove direct-DNS exposure
+
+In Cloudflare DNS for your zone:
+- Keep only proxied CNAME tunnel hostnames (`*.example.com` -> `<tunnel-id>.cfargotunnel.com`).
+- Remove `A`/`AAAA` records that point app hostnames to the OVH public IP.
+
+#### B5) Enforce Access policies
+
+In the tunnel owner's Zero Trust Access organization:
+- Create one Self-hosted app per hostname (`ssh`, `admin`, `api`, `smb`, `sftp`).
+- Allow only approved identities/groups.
+- Require MFA.
+- Avoid posture requirements tied only to the tunnel owner's managed WARP if cross-org clients must be supported.
+
+### Goal C: Allow one Zero Trust org's clients to access another org's tunnel apps
+
+Target behavior:
+- Laptop stays enrolled in its home Zero Trust org.
+- User accesses the tunnel owner's hostnames successfully.
+- No private-network route bridging is required.
+
+#### C1) Configure access in tunnel-owner org (Org A)
+
+In Org A Access app policies:
+- Include allowed cross-org user identities (emails/groups) in Allow rules.
+- Keep authentication at identity + MFA.
+- Do not require Org-A-specific device posture for this cross-org pattern.
+
+#### C2) Configure egress in client org (Org B)
+
+If Org B Gateway is restrictive, allow outbound and DNS for:
+- `*.example.com`
+- `*.cfargotunnel.com`
+- `*.cloudflareaccess.com`
+- `*.cloudflare.com`
+- IdP domains used during login (`accounts.google.com`, `login.microsoftonline.com`, etc.)
+
+If TLS decryption is enabled in Org B, add decryption bypass for:
+- `*.example.com`
+- `*.cfargotunnel.com`
+- `*.cloudflareaccess.com`
+
+#### C3) Validate cross-org path
+
+Run on: **Client (Laptop)**
+
+```bash
+dig +short ssh.vps.example.com
+curl -Iv https://admin.vps.example.com/admin
+ssh webbvps
+```
+
+Expected:
+- DNS resolves to Cloudflare-managed records.
+- HTTPS handshake succeeds with a trusted certificate.
+- SSH reaches `ubuntu` via `cloudflared` ProxyCommand without Linux password prompt.
 
 ## 1. Choose hostnames
 
