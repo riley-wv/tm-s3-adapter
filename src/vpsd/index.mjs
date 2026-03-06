@@ -32,7 +32,7 @@ const adminUsername = process.env.VPS_ADMIN_USERNAME || 'admin';
 const adminPassword = process.env.VPS_ADMIN_PASSWORD || 'change-admin-password';
 const adminSessionSeconds = Number(process.env.VPS_ADMIN_SESSION_SECONDS || 43200);
 const mountPollSeconds = Number(process.env.VPS_MOUNT_POLL_SECONDS || 30);
-const sambaStreamsBackend = String(process.env.VPS_SAMBA_STREAMS_BACKEND || 'xattr');
+const smbStreamsBackend = normalizeSambaStreamsBackend(process.env.VPS_SAMBA_STREAMS_BACKEND);
 const cookieName = 'tm_admin_session';
 const defaultVpsCacheSettings = Object.freeze({
   enabled: true,
