@@ -42,6 +42,8 @@ cp .env.example .env
 npm run docker:up
 ```
 
+`npm run docker:up` and `npm run docker:down` automatically use `.env` when that file exists.
+
 4. Open:
 
 - Dashboard: `http://127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}/admin`

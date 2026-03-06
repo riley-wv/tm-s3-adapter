@@ -9,8 +9,8 @@
     "dashboard:dev": "cd web/dashboard && NEXT_TELEMETRY_DISABLED=1 next dev",
     "dashboard:build": "cd web/dashboard && NEXT_TELEMETRY_DISABLED=1 next build && rm -rf ../vps-public && mkdir -p ../vps-public && cp -R out/. ../vps-public/",
     "admin:build": "npm run dashboard:build",
-    "docker:up": "docker compose up -d --build",
-    "docker:down": "docker compose down",
+    "docker:up": "if [ -f .env ]; then docker compose --env-file .env up -d --build; else docker compose up -d --build; fi",
+    "docker:down": "if [ -f .env ]; then docker compose --env-file .env down; else docker compose down; fi",
     "test": "node --test"
   },
   "engines": {
