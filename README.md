@@ -107,6 +107,8 @@ Per generated Samba share:
 
 - `fruit:time machine = yes`
 - `vfs objects = catia fruit streams_<backend>` (default backend: `xattr`)
+- `streams_xattr` profile uses `fruit:resource = file`, `fruit:metadata = netatalk`, `fruit:locking = netatalk`
+- `streams_depot` profile uses `fruit:resource = stream`, `fruit:metadata = stream`
 - `force user = root` and `force group = root`
 - Optional quota via `fruit:time machine max size` when `quotaGb > 0`
 

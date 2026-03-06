@@ -30,9 +30,29 @@ function vfsObjects(streamsBackend) {
   return `catia fruit ${normalizeStreamsBackend(streamsBackend)}`;
 }
 
+function fruitProfile(streamsBackend) {
+  const normalized = normalizeStreamsBackend(streamsBackend);
+  if (normalized === 'streams_xattr') {
+    return {
+      resource: 'file',
+      metadata: 'netatalk',
+      locking: 'netatalk',
+      encoding: 'native'
+    };
+  }
+
+  return {
+    resource: 'stream',
+    metadata: 'stream',
+    locking: 'none',
+    encoding: 'native'
+  };
+}
+
 export function buildDiskShareConfig(disk, streamsBackend) {
   const quotaLine = Number(disk.quotaGb) > 0 ? `fruit:time machine max size = ${Math.floor(Number(disk.quotaGb))}G\n` : '';
   const shareVfsObjects = vfsObjects(streamsBackend);
+  const profile = fruitProfile(streamsBackend);
   return `[${disk.smbShareName}]
 path = ${disk.storagePath}
 valid users = ${disk.smbUsername}
@@ -46,9 +66,10 @@ directory mask = 0770
 ea support = yes
 vfs objects = ${shareVfsObjects}
 fruit:time machine = yes
-fruit:metadata = stream
-fruit:resource = file
+fruit:resource = ${profile.resource}
+fruit:metadata = ${profile.metadata}
 fruit:posix_rename = yes
+fruit:encoding = ${profile.encoding}
 fruit:veto_appledouble = no
 fruit:wipe_intentionally_left_blank_rfork = yes
 fruit:delete_empty_adfiles = yes
@@ -56,13 +77,14 @@ ${quotaLine}durable handles = yes
 kernel oplocks = no
 kernel share modes = no
 posix locking = no
-fruit:locking = none
+fruit:locking = ${profile.locking}
 spotlight = no
 `;
 }
 
 export function buildRootShareConfig(shareName, path, streamsBackend) {
   const shareVfsObjects = vfsObjects(streamsBackend);
+  const profile = fruitProfile(streamsBackend);
   return `[${shareName}]
 path = ${path}
 read only = no
@@ -74,12 +96,14 @@ create mask = 0660
 directory mask = 0770
 ea support = yes
 vfs objects = ${shareVfsObjects}
-fruit:metadata = stream
-fruit:resource = file
+fruit:resource = ${profile.resource}
+fruit:metadata = ${profile.metadata}
 fruit:posix_rename = yes
+fruit:encoding = ${profile.encoding}
 fruit:veto_appledouble = no
 fruit:wipe_intentionally_left_blank_rfork = yes
 fruit:delete_empty_adfiles = yes
+fruit:locking = ${profile.locking}
 spotlight = no
 `;
 }

@@ -235,6 +235,8 @@ Generated shares include:
 
 - `fruit:time machine = yes`
 - `vfs objects = catia fruit streams_<backend>` (`VPS_SAMBA_STREAMS_BACKEND`, default `xattr`)
+- `streams_xattr` uses `fruit:resource = file`, `fruit:metadata = netatalk`, `fruit:locking = netatalk`
+- `streams_depot` uses `fruit:resource = stream`, `fruit:metadata = stream`
 - `force user = root`
 - `force group = root`
 - `durable handles = yes`
