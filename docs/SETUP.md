@@ -55,6 +55,8 @@ VPS_SMB_PUBLIC_PORT=445
 npm run docker:up
 ```
 
+The npm Docker scripts automatically use `.env` when it exists in the repo root.
+
 Confirm container is healthy:
 
 ```bash
