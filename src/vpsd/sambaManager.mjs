@@ -39,7 +39,7 @@ browseable = yes
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = acl_xattr catia fruit ${streamsBackend}
+vfs objects = fruit ${streamsBackend} acl_xattr catia 
 fruit:aapl = yes
 fruit:time machine = yes
 fruit:metadata = stream
@@ -54,6 +54,7 @@ kernel share modes = no
 posix locking = no
 fruit:locking = none
 spotlight = no
+spotlight backend = elasticsearch
 `;
 }
 
@@ -68,7 +69,7 @@ force group = root
 create mask = 0660
 directory mask = 0770
 ea support = yes
-vfs objects = acl_xattr catia fruit ${streamsBackend}
+vfs objects = fruit ${streamsBackend} acl_xattr catia 
 fruit:aapl = yes
 fruit:time machine = yes
 fruit:metadata = stream
