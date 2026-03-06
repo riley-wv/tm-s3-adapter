@@ -101,12 +101,12 @@ const defaultDualSourceSettings = Object.freeze({
   workgroupMappingsJson: '[]',
   mountPolicyMode: 'policy_templates',
   postgresEnabled: true,
-  postgresHost: 'postgres',
-  postgresPort: 5432,
-  postgresDatabase: 'tm_adapter',
-  postgresUser: 'tm_adapter',
-  postgresPassword: '',
-  postgresSslMode: 'disable'
+  postgresHost: postgresBootstrapConfig.host,
+  postgresPort: postgresBootstrapConfig.port,
+  postgresDatabase: postgresBootstrapConfig.database,
+  postgresUser: postgresBootstrapConfig.user,
+  postgresPassword: postgresBootstrapConfig.password,
+  postgresSslMode: postgresBootstrapConfig.sslMode
 });
 
 const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
@@ -245,6 +245,11 @@ function normalizeStringValue(value, fallback = '') {
     return fallback;
   }
   return String(value).trim();
+}
+
+function normalizeNonEmptyStringValue(value, fallback = '') {
+  const normalized = normalizeStringValue(value, fallback);
+  return normalized || fallback;
 }
 
 function normalizeAdminAuthMode(value, fallback = 'local') {
@@ -429,7 +434,7 @@ const dualSourceSettingSpecs = Object.freeze({
   postgresHost: {
     envBase: 'VPS_POSTGRES_HOST',
     defaultValue: defaultDualSourceSettings.postgresHost,
-    parse: (value, fallback) => normalizeStringValue(value, fallback)
+    parse: (value, fallback) => normalizeNonEmptyStringValue(value, fallback)
   },
   postgresPort: {
     envBase: 'VPS_POSTGRES_PORT',
@@ -439,17 +444,17 @@ const dualSourceSettingSpecs = Object.freeze({
   postgresDatabase: {
     envBase: 'VPS_POSTGRES_DATABASE',
     defaultValue: defaultDualSourceSettings.postgresDatabase,
-    parse: (value, fallback) => normalizeStringValue(value, fallback)
+    parse: (value, fallback) => normalizeNonEmptyStringValue(value, fallback)
   },
   postgresUser: {
     envBase: 'VPS_POSTGRES_USER',
     defaultValue: defaultDualSourceSettings.postgresUser,
-    parse: (value, fallback) => normalizeStringValue(value, fallback)
+    parse: (value, fallback) => normalizeNonEmptyStringValue(value, fallback)
   },
   postgresPassword: {
     envBase: 'VPS_POSTGRES_PASSWORD',
     defaultValue: defaultDualSourceSettings.postgresPassword,
-    parse: (value, fallback) => normalizeStringValue(value, fallback)
+    parse: (value, fallback) => normalizeNonEmptyStringValue(value, fallback)
   },
   postgresSslMode: {
     envBase: 'VPS_POSTGRES_SSL_MODE',
@@ -458,6 +463,19 @@ const dualSourceSettingSpecs = Object.freeze({
   }
 });
 
+function resolveDualSourceDefaultValue(spec) {
+  let value = spec.defaultValue;
+  const directEnvKey = spec.envBase;
+  if (Object.prototype.hasOwnProperty.call(process.env, directEnvKey)) {
+    value = spec.parse(process.env[directEnvKey], value);
+  }
+  const envDefaultKey = `${spec.envBase}_DEFAULT`;
+  if (Object.prototype.hasOwnProperty.call(process.env, envDefaultKey)) {
+    value = spec.parse(process.env[envDefaultKey], value);
+  }
+  return value;
+}
+
 function resolveDualSourceSettings(settings = {}) {
   const values = {};
   const config = {};
@@ -465,6 +483,12 @@ function resolveDualSourceSettings(settings = {}) {
     let value = spec.defaultValue;
     let source = 'app_default';
     let locked = false;
+
+    const directEnvKey = spec.envBase;
+    if (Object.prototype.hasOwnProperty.call(process.env, directEnvKey)) {
+      value = spec.parse(process.env[directEnvKey], value);
+      source = 'default_env';
+    }
 
     const envDefaultKey = `${spec.envBase}_DEFAULT`;
     if (Object.prototype.hasOwnProperty.call(process.env, envDefaultKey)) {
@@ -494,7 +518,7 @@ function ensureDualSourceSettingsShape(settings) {
   let changed = false;
   for (const [key, spec] of Object.entries(dualSourceSettingSpecs)) {
     const current = Object.prototype.hasOwnProperty.call(settings, key) ? settings[key] : undefined;
-    const normalized = spec.parse(current, spec.defaultValue);
+    const normalized = spec.parse(current, resolveDualSourceDefaultValue(spec));
     if (current === undefined || current !== normalized) {
       settings[key] = normalized;
       changed = true;
