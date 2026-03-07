@@ -19,7 +19,7 @@ Supported storage backends:
 - [Full setup guide](./docs/SETUP.md)
 - [Configuration and environment reference](./docs/CONFIGURATION.md)
 - [Admin/Public API reference](./docs/API.md)
-- [Optional Cloudflare Tunnel setup (commands labeled Server vs Client)](./docs/CLOUDFLARE_TUNNEL.md)
+- [Hybrid access guide: SSH/Admin over Tunnel, SMB/SFTP direct](./docs/HYBRID_ACCESS.md)
 
 ## Quick start
 
@@ -48,8 +48,8 @@ npm run docker:up
 
 - Dashboard: `http://127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}/admin`
 - Admin API: `http://127.0.0.1:${VPS_ADMIN_API_PORT:-8788}/admin/api`
-- SMB: `smb://127.0.0.1:${VPS_SMB_PORT:-1445}`
-- SFTP: `sftp://127.0.0.1:${VPS_SFTP_PORT:-2222}`
+- SMB: `smb://<your-smb-host>:${VPS_SMB_PUBLIC_PORT:-445}`
+- SFTP: `sftp://<drive-user>@<your-sftp-host>:${VPS_SFTP_PORT:-2222}`
 
 Drive creation in the dashboard generates both SMB and drive-scoped SFTP credentials/URLs.
 
@@ -77,14 +77,15 @@ If FUSE is not available, cloud mounts will fail, but local-mode disks can still
 
 ## Port model
 
-`docker-compose.yml` binds host loopback ports to container ports:
+`docker-compose.yml` keeps admin/API/Postgres on loopback and publishes SMB/SFTP directly:
 
 - Dashboard: `127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787} -> 8787`
 - Admin/Public API: `127.0.0.1:${VPS_ADMIN_API_PORT:-8788} -> 8788`
-- SMB: `127.0.0.1:${VPS_SMB_PORT:-1445} -> 445`
-- SFTP: `127.0.0.1:${VPS_SFTP_PORT:-2222} -> 2222`
+- SMB: `0.0.0.0:${VPS_SMB_PORT:-1445} -> 445`
+- SFTP: `0.0.0.0:${VPS_SFTP_PORT:-2222} -> 2222`
+- Postgres: `127.0.0.1:5432 -> 5432`
 
-Services are intentionally local-only at the host level. Publish them externally with a reverse proxy or Cloudflare Tunnel if needed.
+Use host firewall rules or cloud security groups to allow only SMB (`445/tcp`) and SFTP (`2222/tcp`) publicly. Keep admin/API/SSH/Postgres restricted to tunnel, VPN, or loopback-only access.
 
 ## Cloud mounts and rclone
 

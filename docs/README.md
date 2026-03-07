@@ -3,4 +3,4 @@
 - [Setup Guide](./SETUP.md)
 - [Configuration Reference](./CONFIGURATION.md)
 - [API Reference](./API.md)
-- [Optional Cloudflare Tunnel Setup](./CLOUDFLARE_TUNNEL.md)
+- [Hybrid access guide: SSH/Admin over Tunnel, SMB/SFTP direct](./HYBRID_ACCESS.md)

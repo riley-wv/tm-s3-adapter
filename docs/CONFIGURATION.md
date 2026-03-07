@@ -15,7 +15,7 @@ This document explains environment variables, runtime behavior, and storage/netw
 - `VPS_SMB_PUBLIC_PORT` (default follows `VPS_SMB_PORT` in compose)
   - Port used in generated SMB URLs; set to client-visible port
 - `VPS_SFTP_PORT` (default `2222`)
-  - Host bind and internal SSHD port
+  - Direct SFTP port exposed by the container-hosted SFTP service
 
 ### Authentication and session
 
@@ -220,14 +220,16 @@ Because cache data is stored on the persistent VPS volume (`/data/vps` by defaul
 
 ## Networking and exposure model
 
-Compose binds all services to `127.0.0.1` on the host by default.
+Compose keeps dashboard/API/Postgres on `127.0.0.1` and publishes SMB/SFTP on the host network interface.
 
 This means:
 
-- Safe default: no direct public exposure
-- Access via local host, SSH tunnel, reverse proxy, or Cloudflare Tunnel
+- Dashboard/API/Postgres stay local-only unless you add a tunnel, reverse proxy, or VPN
+- SMB and SFTP can be reached directly once DNS and firewall rules allow them
 
 If external routing changes visible SMB port, set `VPS_SMB_PUBLIC_PORT` so generated SMB URLs remain correct.
+
+The app stores a single external `hostname` in settings and uses it for generated SMB and SFTP URLs. If you expose SMB and SFTP on different public hostnames, keep the stored `hostname` set to the SMB hostname and treat the SFTP hostname as a manual client endpoint.
 
 ## SMB behavior for Time Machine
 
@@ -251,7 +253,8 @@ When `streams_xattr` is selected, the adapter now probes the target share path f
 - Set strong secrets for admin/API/SFTP in `.env`
 - Keep enterprise mode disabled unless you need it
 - If using env locks (`*_FORCE`), document ownership and change process
-- Restrict host access; keep loopback binds unless intentionally exposing
-- Use Cloudflare Access or another auth layer for web/admin exposure
+- Restrict host access; keep admin/API/Postgres loopback-only unless intentionally exposing them
+- Use a dedicated auth layer for web/admin exposure when you publish them beyond loopback
+- Limit public firewall exposure to the specific share ports you intend to expose
 - Rotate SMB disk passwords periodically
 - Back up metadata and rclone config regularly

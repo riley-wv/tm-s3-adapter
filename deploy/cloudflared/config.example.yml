@@ -1,25 +1,17 @@
-tunnel: webbvps
-credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+tunnel: <tunnel-uuid>
+credentials-file: /etc/cloudflared/<tunnel-uuid>.json
 
 ingress:
-  # Host SSH daemon (for VPS management over Cloudflare Access).
-  - hostname: ssh.vps.webbventures.com.au
+  # Host SSH daemon kept behind Cloudflare Access.
+  - hostname: ssh.example.com
     service: ssh://localhost:22
 
-  # tm-s3-adapter admin dashboard (container port 8787 mapped to localhost host port).
-  - hostname: admin.vps.webbventures.com.au
+  # tm-s3-adapter dashboard and admin API stay on loopback and are published through the tunnel.
+  - hostname: admin.example.com
     service: http://localhost:8787
 
-  # tm-s3-adapter admin API (container port 8788 mapped to localhost host port).
-  - hostname: api.vps.webbventures.com.au
+  - hostname: api.example.com
     service: http://localhost:8788
 
-  # SMB and SFTP are TCP services. Connect from clients with:
-  # cloudflared access tcp --hostname <hostname> --url localhost:<local-port>
-  - hostname: smb.vps.webbventures.com.au
-    service: tcp://localhost:1445
-
-  - hostname: sftp.vps.webbventures.com.au
-    service: tcp://localhost:2222
-
+  # SMB and SFTP are intentionally not tunneled in the hybrid access profile.
   - service: http_status:404

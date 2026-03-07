@@ -8,7 +8,6 @@ This guide covers end-to-end setup for a new host, first login, first drive, and
 - Docker Engine + Docker Compose plugin
 - Host-level FUSE support (`/dev/fuse`)
 - macOS client for Time Machine testing
-- Optional: domain + Cloudflare account (only if using tunnel)
 
 Check prerequisites:
 
@@ -47,6 +46,7 @@ Recommended for real VPS + standard SMB clients:
 ```dotenv
 VPS_SMB_PORT=445
 VPS_SMB_PUBLIC_PORT=445
+VPS_SFTP_PORT=2222
 ```
 
 ## 3. Start services
@@ -85,6 +85,8 @@ Complete initial setup values:
 - `smbPublicPort`: port embedded in generated SMB URLs
 
 The setup call stores values in metadata and can apply root Samba share config.
+
+When you use separate public hostnames for SMB and SFTP, keep `hostname` set to the SMB hostname so generated Time Machine URLs stay correct. The app currently uses the same hostname for generated SFTP URLs, so use the SFTP hostname manually for direct SFTP access.
 
 Optional enterprise onboarding:
 
@@ -203,7 +205,14 @@ At minimum, back up:
 ### Cannot access dashboard/API
 
 - Confirm loopback port mapping in `docker-compose.yml`
-- Confirm tunnel/proxy target (if used) points to host loopback ports
+- Confirm any proxy or tunnel target points to the host loopback ports
+
+### Direct SMB or SFTP access fails
+
+- Confirm host firewall/security group allows `445/tcp` and `2222/tcp`
+- Confirm `docker-compose.yml` is publishing SMB/SFTP on `0.0.0.0`
+- Confirm DNS for the SMB/SFTP hostnames points directly to the VPS public IP
+- See the hybrid access runbook in [HYBRID_ACCESS.md](./HYBRID_ACCESS.md)
 
 ### Enterprise mode fails to enable
 
