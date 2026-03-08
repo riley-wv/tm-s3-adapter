@@ -1,15 +1,33 @@
 # Setup Guide
 
-This guide covers end-to-end setup for a new host, first login, first drive, and first Time Machine backup.
+This guide covers a complete first install of the open source project, from cloning the repository to creating the first share.
 
-## 1. Prerequisites
+## 1. What you are deploying
 
-- Linux VPS or local Linux machine
-- Docker Engine + Docker Compose plugin
-- Host-level FUSE support (`/dev/fuse`)
-- macOS client for Time Machine testing
+The current stack is:
 
-Check prerequisites:
+- one Node.js service container
+- Samba in the same application container
+- SFTP/SSH in the same application container
+- Postgres for persisted settings
+- optional rclone-managed cloud mounts
+
+The project is designed for:
+
+- one Linux VPS
+- direct SMB and SFTP access when required
+- dashboard and admin API access through loopback, SSH tunnel, VPN, or reverse proxy
+
+## 2. Host prerequisites
+
+Required:
+
+- Linux host
+- Docker Engine
+- Docker Compose plugin
+- `/dev/fuse` available on the host for cloud mounts
+
+Useful checks:
 
 ```bash
 docker --version
@@ -17,15 +35,22 @@ docker compose version
 ls -l /dev/fuse
 ```
 
-## 2. Clone and prepare environment
+If `/dev/fuse` is missing, local shares can still work, but cloud mounts will not.
+
+## 3. Clone the repository
 
 ```bash
 git clone <your-repo-url> tm-s3-adapter
 cd tm-s3-adapter
+```
+
+## 4. Create the environment file
+
+```bash
 cp .env.example .env
 ```
 
-Edit `.env` and set secure values:
+At minimum set:
 
 ```dotenv
 VPS_API_TOKEN=<long-random-token>
@@ -34,14 +59,7 @@ VPS_SFTP_PASSWORD=<long-random-password>
 VPS_POSTGRES_PASSWORD=<long-random-password>
 ```
 
-Recommended for local macOS Docker usage:
-
-```dotenv
-VPS_SMB_PORT=1445
-VPS_SMB_PUBLIC_PORT=1445
-```
-
-Recommended for real VPS + standard SMB clients:
+Recommended defaults for a normal VPS deployment:
 
 ```dotenv
 VPS_SMB_PORT=445
@@ -49,15 +67,21 @@ VPS_SMB_PUBLIC_PORT=445
 VPS_SFTP_PORT=2222
 ```
 
-## 3. Start services
+Recommended defaults for local Docker testing on a laptop:
+
+```dotenv
+VPS_SMB_PORT=1445
+VPS_SMB_PUBLIC_PORT=1445
+VPS_SFTP_PORT=2222
+```
+
+## 5. Start the stack
 
 ```bash
 npm run docker:up
 ```
 
-The npm Docker scripts automatically use `.env` when it exists in the repo root.
-
-Confirm container is healthy:
+Verify:
 
 ```bash
 docker compose ps
@@ -65,161 +89,238 @@ docker logs --tail=120 tm-adapter-vps
 curl -fsS http://127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}/health | jq
 ```
 
-Expected `/health` response includes `ok: true` plus Samba and mount-manager status.
+Expected health output includes:
 
-## 4. First admin login and setup
+- `ok: true`
+- Samba status
+- mount manager status
 
-Open dashboard:
+## 6. Open the dashboard
+
+Open:
 
 - `http://127.0.0.1:${VPS_ADMIN_DASHBOARD_PORT:-8787}/admin`
 
-Login defaults from env:
+Default login:
 
-- Username: `VPS_ADMIN_USERNAME` (default `admin`)
-- Password: `VPS_ADMIN_PASSWORD`
+- username: `VPS_ADMIN_USERNAME` or `admin`
+- password: `VPS_ADMIN_PASSWORD`
 
-Complete initial setup values:
+## 7. Complete initial setup
 
-- `hostname`: external hostname clients should use
-- `rootShareName`: root SMB share name (default `timemachine`)
-- `smbPublicPort`: port embedded in generated SMB URLs
+Fill in:
 
-The setup call stores values in metadata and can apply root Samba share config.
+- `hostname`
+  - the hostname used for generated SMB URLs
+- `browseShareName`
+  - optional top-level SMB browse share name
+- `browseShareEnabled`
+  - whether the browse share should be generated
+- `smbPublicPort`
+  - the visible client-facing SMB port
 
-When you use separate public hostnames for SMB and SFTP, keep `hostname` set to the SMB hostname so generated Time Machine URLs stay correct. The app currently uses the same hostname for generated SFTP URLs, so use the SFTP hostname manually for direct SFTP access.
+Also review:
 
-Optional enterprise onboarding:
+- `smbStreamsBackend`
+- `mountPollSeconds`
+- cache settings
+- centralized auth settings if you plan to use them
 
-- You can enable enterprise mode during onboarding.
-- Every enterprise setting is also available later in Dashboard -> Settings.
-- If a setting is provided via `*_FORCE` env var, the UI will show it as locked/read-only.
-- Setup/settings config is stored in Postgres, so Postgres must be configured.
+Important:
 
-## 5. Create your first drive (local mode)
+- The application currently stores one primary hostname for generated URLs.
+- If SMB and SFTP use different public hostnames, keep the configured hostname set to the SMB hostname and treat the SFTP hostname as a manual endpoint.
 
-In dashboard, create a drive:
+## 8. Create the first share
 
-- `name`: human-readable label
-- `storageMode`: `local`
-- `quotaGb`: optional per-drive cap
-- `applySamba`: enabled
+Go to the Shares tab and create a share with:
 
-This generates:
+- `name`
+- `storageMode`
+  - `local`
+  - `cloud-mount`
+  - `cloudmounter`
+- `shareName`
+- `timeMachineEnabled`
+- `timeMachineQuotaGb`
+- `accessMode`
+  - `legacy-per-share`
+  - `centralized`
 
-- SMB share name
-- SMB username/password
-- SFTP username/password
-- `diskShareUrl`, root/subdir URLs, and drive-scoped `sftpUrl`
+### If you choose `legacy-per-share`
 
-## 6. Connect from macOS Finder
+The app creates:
 
-1. Finder -> Go -> Connect to Server
-2. Enter `diskShareUrl` from dashboard
-3. Authenticate with generated SMB credentials
-4. Open System Settings -> General -> Time Machine
-5. Select the mounted SMB share as backup disk
+- one SMB username/password for the share
+- one SFTP username/password for the share
 
-If prompted repeatedly for credentials, rotate the drive SMB password in dashboard and reconnect.
+### If you choose `centralized`
 
-## 7. Configure cloud-backed storage (optional)
+The share no longer relies on its own per-share protocol identities as the primary access mechanism. Instead:
 
-### S3 / S3-compatible
+- assign users directly
+- assign groups/workgroups
+- apply SMB and SFTP again if needed
 
-Create a cloud mount with:
+## 9. Create centralized users and groups
 
-- `provider`: `s3`
+If you want centralized access:
+
+1. Create one or more groups
+2. Create one or more users
+3. Add users to groups
+4. Assign users and/or groups to shares
+
+The current implementation supports:
+
+- local centralized users end to end
+- OIDC provider configuration
+- LDAP/AD provider configuration
+
+Current limitation:
+
+- OIDC and LDAP/AD provider-backed live auth flows are not fully wired end to end yet
+
+## 10. Connect from clients
+
+### SMB
+
+Use the share URL shown in the dashboard, for example:
+
+```text
+smb://server/share-name
+```
+
+### Time Machine
+
+Only use shares with Time Machine mode enabled.
+
+On macOS:
+
+1. Connect to the SMB share in Finder
+2. Open System Settings
+3. Open Time Machine
+4. Select the share as the destination
+
+### SFTP
+
+Use either:
+
+- the legacy per-share SFTP account
+- a centralized protocol user that has access to the share
+
+## 11. Add cloud-backed storage
+
+### S3 and S3-compatible
+
+Create a mount with:
+
+- `provider = s3`
 - `bucket`
 - `accessKeyId`
 - `secretAccessKey`
-- Optional: `endpoint`, `region`, `prefix`, `s3Provider`
+- optional `endpoint`
+- optional `region`
+- optional `prefix`
+- optional `s3Provider`
 
-Then create a drive with:
+Then create a share with:
 
-- `storageMode`: `cloud-mount`
-- `storageMountId`: selected mount
+- `storageMode = cloud-mount`
+- `storageMountId = <mount-id>`
 
-### Google Drive / OneDrive
+### Google Drive or OneDrive
 
-1. Configure rclone interactively:
+Configure rclone first:
 
 ```bash
 docker exec -it tm-adapter-vps rclone config
 ```
 
-2. Create mount:
+Then create a mount with:
 
-- `provider`: `google-drive` or `onedrive`
-- `remotePath`: e.g. `gdrive:` or `onedrive:`
-- `mountPath`: local mount point under `/mnt/tm-cloud/...`
+- `provider = google-drive` or `onedrive`
+- `remotePath`
+- `mountPath`
 
-3. Create drive using `storageMode=cloud-mount` and that mount ID.
+Then attach a share to that mount.
 
-## 8. Operational checks
+## 12. Validate the install
 
-- Dashboard state: `GET /admin/api/state`
-- Runtime logs stream: `GET /admin/api/logs/stream`
-- Tailed service/container logs: `GET /admin/api/log-tail/stream?source=...`
-- Samba manager status: `GET /admin/api/samba/status`
+Recommended validation order:
 
-See full endpoint details in [API.md](./API.md).
+1. Create a local share
+2. Confirm SMB access works
+3. Confirm SFTP access works
+4. If needed, enable Time Machine on that local share
+5. Only then move on to cloud mounts
 
-## 9. Upgrades
+Useful checks:
+
+- `GET /admin/api/state`
+- `GET /admin/api/samba/status`
+- `GET /admin/api/users`
+- `GET /admin/api/groups`
+- `GET /admin/api/identity-providers`
+
+## 13. Upgrade workflow
 
 ```bash
 git pull
 npm run docker:up
 ```
 
-`docker compose up -d --build` recreates the container while keeping mounted data directories.
+The stack rebuild keeps data in the mounted host directories.
 
-## 10. Data persistence and backup
+Compatibility behavior during upgrades:
 
-Persisted host directories:
+- old `disks` metadata is normalized into shares
+- existing Time Machine-oriented shares keep Time Machine enabled
+- legacy per-share credentials remain usable until you switch a share to centralized access
 
-- `./data/vps` -> metadata + SMB share tree + runtime logs
-- `./data/mnt` -> cloud mount targets
-- `./data/rclone` -> rclone remotes/config
+## 14. Backups
 
-At minimum, back up:
+Back up at least:
 
 - `./data/vps/metadata.json`
 - `./data/rclone/rclone.conf`
+- your `.env`
 
-## 11. Troubleshooting
+Useful full-backup paths:
 
-### Cloud mount fails to mount
+- `./data/vps`
+- `./data/mnt`
+- `./data/rclone`
 
-- Verify FUSE exists on host: `ls -l /dev/fuse`
-- Check mount manager errors in dashboard state
-- Run container logs: `docker logs tm-adapter-vps`
-- For S3, validate endpoint/region/credentials
+## 15. Common problems
 
-### Time Machine cannot complete backup
+### Cloud mount does not work
 
-- Use SMB port 445 where possible in production
-- Validate xattrs/streams support (`streams_xattr`)
-- `streams_xattr` requires real filesystem xattrs on the share path; `rclone mount` cloud paths usually cannot provide them
-- If clients can connect but all writes fail with I/O errors, set `VPS_SAMBA_STREAMS_BACKEND=depot` and restart the container
-- Test a `local` drive first to isolate cloud mount issues
+- verify `/dev/fuse`
+- check mount manager state
+- inspect container logs
+- test the same workflow with a local share first
 
-### Cannot access dashboard/API
+### SMB writes fail on cloud-backed shares
 
-- Confirm loopback port mapping in `docker-compose.yml`
-- Confirm any proxy or tunnel target points to the host loopback ports
+- switch `VPS_SAMBA_STREAMS_BACKEND=depot`
+- rebuild and restart
 
-### Direct SMB or SFTP access fails
+### Time Machine is unreliable
 
-- Confirm host firewall/security group allows `445/tcp` and `2222/tcp`
-- Confirm `docker-compose.yml` is publishing SMB/SFTP on `0.0.0.0`
-- Confirm DNS for the SMB/SFTP hostnames points directly to the VPS public IP
-- See the hybrid access runbook in [HYBRID_ACCESS.md](./HYBRID_ACCESS.md)
+- validate the share in local mode first
+- keep production SMB on port `445`
+- confirm the share has Time Machine enabled
+- confirm the share path and streams backend support the required Samba behavior
 
-### Enterprise mode fails to enable
+### Centralized access looks configured but does not work
 
-- Verify Postgres is enabled/configured (host, port, database, user, password).
-- Check whether a `*_FORCE` env variable is locking a field you are trying to change in UI.
+- confirm the share is in `centralized` access mode
+- confirm users or groups are assigned under SMB and/or SFTP access policy
+- confirm centralized users have protocol usernames and passwords
+- remember that OIDC and LDAP/AD runtime integration is not fully complete yet
 
-### SFTP login fails
+### Admin login fails after switching auth mode
 
-- Verify `VPS_SFTP_USERNAME` / `VPS_SFTP_PASSWORD`
-- Check `sftp.log` under `./data/vps/runtime-logs`
+- use the break-glass local admin credentials if still enabled
+- verify centralized local admin users exist before depending on them

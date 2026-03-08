@@ -13,6 +13,7 @@ import { JsonStore } from '../shared/jsonStore.mjs';
 import { PostgresSettingsStore } from '../shared/postgresSettingsStore.mjs';
 import { buildXattrProbeFailureMessage, probeXattrSupport, SambaManager } from './sambaManager.mjs';
 import { CloudMountManager } from './cloudMountManager.mjs';
+import { emptyAccessPolicy, normalizeAccessMode, normalizeAccessPolicy, normalizeIdentityProviderType, normalizeMemberUserIds, resolveAssignedUsers } from './shareAccess.mjs';
 import { SftpManager } from './sftpManager.mjs';
 
 const legacyPort = process.env.VPS_PORT ? Number(process.env.VPS_PORT) : null;
@@ -111,10 +112,12 @@ const defaultDualSourceSettings = Object.freeze({
 });
 
 const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
-  version: 4,
+  version: 5,
   settings: {
     hostname: '',
     rootShareName: 'timemachine',
+    browseShareName: 'timemachine',
+    browseShareEnabled: true,
     smbPublicPort,
     smbEnabled: true,
     sftpEnabled: true,
@@ -135,7 +138,11 @@ const metadataStore = new JsonStore(join(dataDir, 'metadata.json'), {
     ...defaultDualSourceSettings
   },
   cloudMounts: {},
-  disks: {}
+  disks: {},
+  users: {},
+  groups: {},
+  identityProviders: {},
+  groupMappings: {}
 });
 
 const sambaManager = new SambaManager();
@@ -256,8 +263,14 @@ function normalizeNonEmptyStringValue(value, fallback = '') {
 
 function normalizeAdminAuthMode(value, fallback = 'local') {
   const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'centralized' || normalized === 'centralised' || normalized === 'enterprise') {
+    return 'centralized';
+  }
   if (normalized === 'oidc') {
     return 'oidc';
+  }
+  if (normalized === 'ldap' || normalized === 'ad' || normalized === 'active-directory') {
+    return 'ldap';
   }
   if (normalized === 'local') {
     return 'local';
@@ -267,6 +280,12 @@ function normalizeAdminAuthMode(value, fallback = 'local') {
 
 function normalizeProtocolAuthMode(value, fallback = 'local') {
   const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'centralized' || normalized === 'centralised' || normalized === 'enterprise') {
+    return 'centralized';
+  }
+  if (normalized === 'legacy' || normalized === 'legacy-per-share') {
+    return 'legacy-per-share';
+  }
   if (normalized === 'enterprise') {
     return 'enterprise';
   }
@@ -527,6 +546,179 @@ function ensureDualSourceSettingsShape(settings) {
     }
   }
   return changed;
+}
+
+function normalizeBrowseShareSettings(settings) {
+  let changed = false;
+  if (!settings.rootShareName) {
+    settings.rootShareName = 'timemachine';
+    changed = true;
+  }
+  if (!settings.browseShareName) {
+    settings.browseShareName = settings.rootShareName || 'timemachine';
+    changed = true;
+  }
+  const normalizedBrowseShareName = sanitizeShareName(settings.browseShareName || settings.rootShareName || 'timemachine');
+  if (settings.browseShareName !== normalizedBrowseShareName) {
+    settings.browseShareName = normalizedBrowseShareName;
+    changed = true;
+  }
+  if (settings.rootShareName !== normalizedBrowseShareName) {
+    settings.rootShareName = normalizedBrowseShareName;
+    changed = true;
+  }
+  if (settings.browseShareEnabled === undefined) {
+    settings.browseShareEnabled = true;
+    changed = true;
+  }
+  return changed;
+}
+
+function normalizeCentralUserShape(userId, user = {}) {
+  let changed = false;
+  if (!user.id) {
+    user.id = userId;
+    changed = true;
+  }
+  if (!user.username) {
+    user.username = sanitizeUsername(userId);
+    changed = true;
+  }
+  if (!user.displayName) {
+    user.displayName = user.username;
+    changed = true;
+  }
+  const normalizedAuthType = normalizeIdentityProviderType(user.authType || user.providerType || 'local', 'local');
+  if (user.authType !== normalizedAuthType) {
+    user.authType = normalizedAuthType;
+    changed = true;
+  }
+  if (user.password === undefined) {
+    user.password = '';
+    changed = true;
+  }
+  if (!user.protocolUsername) {
+    user.protocolUsername = sanitizeUsername(user.username);
+    changed = true;
+  }
+  if (!user.protocolPassword) {
+    user.protocolPassword = randomPassword();
+    changed = true;
+  }
+  if (user.enabled === undefined) {
+    user.enabled = true;
+    changed = true;
+  }
+  if (user.isAdmin === undefined) {
+    user.isAdmin = false;
+    changed = true;
+  }
+  if (user.smbEnabled === undefined) {
+    user.smbEnabled = true;
+    changed = true;
+  }
+  if (user.sftpEnabled === undefined) {
+    user.sftpEnabled = true;
+    changed = true;
+  }
+  if (user.identityProviderId === undefined) {
+    user.identityProviderId = '';
+    changed = true;
+  }
+  if (user.externalSubject === undefined) {
+    user.externalSubject = '';
+    changed = true;
+  }
+  if (!user.createdAt) {
+    user.createdAt = new Date().toISOString();
+    changed = true;
+  }
+  if (!user.updatedAt) {
+    user.updatedAt = user.createdAt;
+    changed = true;
+  }
+  return { user, changed };
+}
+
+function normalizeGroupShape(groupId, group = {}) {
+  let changed = false;
+  if (!group.id) {
+    group.id = groupId;
+    changed = true;
+  }
+  if (!group.name) {
+    group.name = groupId;
+    changed = true;
+  }
+  const normalizedMembers = normalizeMemberUserIds(group.memberUserIds);
+  if (JSON.stringify(group.memberUserIds || []) !== JSON.stringify(normalizedMembers)) {
+    group.memberUserIds = normalizedMembers;
+    changed = true;
+  }
+  if (group.description === undefined) {
+    group.description = '';
+    changed = true;
+  }
+  if (!group.createdAt) {
+    group.createdAt = new Date().toISOString();
+    changed = true;
+  }
+  if (!group.updatedAt) {
+    group.updatedAt = group.createdAt;
+    changed = true;
+  }
+  return { group, changed };
+}
+
+function normalizeIdentityProviderShape(providerId, provider = {}) {
+  let changed = false;
+  if (!provider.id) {
+    provider.id = providerId;
+    changed = true;
+  }
+  if (!provider.name) {
+    provider.name = providerId;
+    changed = true;
+  }
+  const normalizedType = normalizeIdentityProviderType(provider.type || 'local', 'local');
+  if (provider.type !== normalizedType) {
+    provider.type = normalizedType;
+    changed = true;
+  }
+  if (provider.enabled === undefined) {
+    provider.enabled = true;
+    changed = true;
+  }
+  if (!provider.config || typeof provider.config !== 'object') {
+    provider.config = {};
+    changed = true;
+  }
+  if (!provider.createdAt) {
+    provider.createdAt = new Date().toISOString();
+    changed = true;
+  }
+  if (!provider.updatedAt) {
+    provider.updatedAt = provider.createdAt;
+    changed = true;
+  }
+  return { provider, changed };
+}
+
+function syncUserGroupMembership(draft, userId, groupIds = []) {
+  const normalizedGroupIds = normalizeMemberUserIds(groupIds);
+  for (const group of Object.values(draft.groups || {})) {
+    if (!group || typeof group !== 'object') {
+      continue;
+    }
+    const members = new Set(normalizeMemberUserIds(group.memberUserIds));
+    if (normalizedGroupIds.includes(group.id)) {
+      members.add(userId);
+    } else {
+      members.delete(userId);
+    }
+    group.memberUserIds = [...members].sort((left, right) => left.localeCompare(right));
+    group.updatedAt = new Date().toISOString();
+  }
 }
 
 function assertMutableDualSourcePayload(payload, settings) {
@@ -1243,10 +1435,12 @@ function normalizeMetadataShape(metadata) {
   if (!metadata || typeof metadata !== 'object') {
     return {
       metadata: {
-        version: 3,
+        version: 5,
         settings: {
           hostname: '',
           rootShareName: 'timemachine',
+          browseShareName: 'timemachine',
+          browseShareEnabled: true,
           smbPublicPort,
           smbEnabled: true,
           sftpEnabled: true,
@@ -1267,7 +1461,11 @@ function normalizeMetadataShape(metadata) {
           ...defaultDualSourceSettings
         },
         cloudMounts: {},
-        disks: {}
+        disks: {},
+        users: {},
+        groups: {},
+        identityProviders: {},
+        groupMappings: {}
       },
       changed: true
     };
@@ -1277,6 +1475,8 @@ function normalizeMetadataShape(metadata) {
     metadata.settings = {
       hostname: '',
       rootShareName: 'timemachine',
+      browseShareName: 'timemachine',
+      browseShareEnabled: true,
       smbPublicPort,
       smbEnabled: true,
       sftpEnabled: true,
@@ -1302,8 +1502,7 @@ function normalizeMetadataShape(metadata) {
       metadata.settings.hostname = '';
       changed = true;
     }
-    if (!metadata.settings.rootShareName) {
-      metadata.settings.rootShareName = 'timemachine';
+    if (normalizeBrowseShareSettings(metadata.settings)) {
       changed = true;
     }
     if (!Number.isFinite(Number(metadata.settings.smbPublicPort))) {
@@ -1359,6 +1558,9 @@ function normalizeMetadataShape(metadata) {
       changed = true;
     }
     if (ensureDualSourceSettingsShape(metadata.settings)) {
+      changed = true;
+    }
+    if (normalizeBrowseShareSettings(metadata.settings)) {
       changed = true;
     }
   }
@@ -1487,6 +1689,10 @@ function normalizeMetadataShape(metadata) {
         id: diskId,
         name: diskId,
         quotaGb: 0,
+        timeMachineEnabled: true,
+        timeMachineQuotaGb: 0,
+        accessMode: 'legacy-per-share',
+        accessPolicy: emptyAccessPolicy(),
         storageMode: 'local',
         storageBasePath: smbShareRoot,
         storagePath: safeJoin(smbShareRoot, diskId),
@@ -1516,6 +1722,28 @@ function normalizeMetadataShape(metadata) {
     }
     if (!Number.isFinite(Number(disk.quotaGb))) {
       disk.quotaGb = 0;
+      changed = true;
+    }
+    if (disk.timeMachineEnabled === undefined) {
+      disk.timeMachineEnabled = true;
+      changed = true;
+    }
+    if (!Number.isFinite(Number(disk.timeMachineQuotaGb))) {
+      disk.timeMachineQuotaGb = Number(disk.quotaGb || 0);
+      changed = true;
+    }
+    if (disk.accessMode === undefined) {
+      disk.accessMode = 'legacy-per-share';
+      changed = true;
+    }
+    const normalizedAccessMode = normalizeAccessMode(disk.accessMode, 'legacy-per-share');
+    if (disk.accessMode !== normalizedAccessMode) {
+      disk.accessMode = normalizedAccessMode;
+      changed = true;
+    }
+    const normalizedAccessPolicy = normalizeAccessPolicy(disk.accessPolicy, emptyAccessPolicy());
+    if (JSON.stringify(disk.accessPolicy || {}) !== JSON.stringify(normalizedAccessPolicy)) {
+      disk.accessPolicy = normalizedAccessPolicy;
       changed = true;
     }
 
@@ -1595,13 +1823,72 @@ function normalizeMetadataShape(metadata) {
     }
   }
 
-  if (!metadata.version || metadata.version < 4) {
+  if (!metadata.users || typeof metadata.users !== 'object') {
+    metadata.users = {};
+    changed = true;
+  }
+  for (const [userId, rawUser] of Object.entries(metadata.users)) {
+    if (!rawUser || typeof rawUser !== 'object') {
+      const normalized = normalizeCentralUserShape(userId, {});
+      metadata.users[userId] = normalized.user;
+      changed = true;
+      continue;
+    }
+    const normalized = normalizeCentralUserShape(userId, rawUser);
+    metadata.users[userId] = normalized.user;
+    if (normalized.changed) {
+      changed = true;
+    }
+  }
+
+  if (!metadata.groups || typeof metadata.groups !== 'object') {
+    metadata.groups = {};
+    changed = true;
+  }
+  for (const [groupId, rawGroup] of Object.entries(metadata.groups)) {
+    if (!rawGroup || typeof rawGroup !== 'object') {
+      const normalized = normalizeGroupShape(groupId, {});
+      metadata.groups[groupId] = normalized.group;
+      changed = true;
+      continue;
+    }
+    const normalized = normalizeGroupShape(groupId, rawGroup);
+    metadata.groups[groupId] = normalized.group;
+    if (normalized.changed) {
+      changed = true;
+    }
+  }
+
+  if (!metadata.identityProviders || typeof metadata.identityProviders !== 'object') {
+    metadata.identityProviders = {};
+    changed = true;
+  }
+  for (const [providerId, rawProvider] of Object.entries(metadata.identityProviders)) {
+    if (!rawProvider || typeof rawProvider !== 'object') {
+      const normalized = normalizeIdentityProviderShape(providerId, {});
+      metadata.identityProviders[providerId] = normalized.provider;
+      changed = true;
+      continue;
+    }
+    const normalized = normalizeIdentityProviderShape(providerId, rawProvider);
+    metadata.identityProviders[providerId] = normalized.provider;
+    if (normalized.changed) {
+      changed = true;
+    }
+  }
+
+  if (!metadata.groupMappings || typeof metadata.groupMappings !== 'object') {
+    metadata.groupMappings = {};
+    changed = true;
+  }
+
+  if (!metadata.version || metadata.version < 5) {
     // Pre-existing installs with drives already configured skip the setup wizard automatically.
     if (Object.keys(metadata.disks || {}).length > 0 && !metadata.settings.setupCompleted) {
       metadata.settings.setupCompleted = true;
       changed = true;
     }
-    metadata.version = 4;
+    metadata.version = 5;
     changed = true;
   }
 
@@ -1775,6 +2062,73 @@ function randomPassword(length = 24) {
   return output;
 }
 
+function centralUserForResponse(user, { includeSecrets = false } = {}) {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    authType: user.authType,
+    protocolUsername: user.protocolUsername,
+    enabled: user.enabled !== false,
+    isAdmin: user.isAdmin === true,
+    smbEnabled: user.smbEnabled !== false,
+    sftpEnabled: user.sftpEnabled !== false,
+    groupIds: normalizeMemberUserIds(user.groupIds),
+    identityProviderId: user.identityProviderId || '',
+    externalSubject: user.externalSubject || '',
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt,
+    ...(includeSecrets ? {
+      password: user.password || '',
+      protocolPassword: user.protocolPassword || ''
+    } : {})
+  };
+}
+
+function groupForResponse(group) {
+  return {
+    id: group.id,
+    name: group.name,
+    description: group.description || '',
+    memberUserIds: normalizeMemberUserIds(group.memberUserIds),
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt
+  };
+}
+
+function identityProviderForResponse(provider) {
+  return {
+    id: provider.id,
+    name: provider.name,
+    type: provider.type,
+    enabled: provider.enabled !== false,
+    config: { ...(provider.config || {}) },
+    createdAt: provider.createdAt,
+    updatedAt: provider.updatedAt
+  };
+}
+
+function browseShareName(settings) {
+  return sanitizeShareName(settings?.browseShareName || settings?.rootShareName || 'timemachine');
+}
+
+function buildBrowseShareUrl(host, settings) {
+  const port = effectiveSmbPublicPort(settings);
+  const { serverWithPort } = normalizedServerWithPort(host, port, 445);
+  return `smb://${serverWithPort}/${browseShareName(settings)}`;
+}
+
+function findCentralAdminUser(metadata, username, password) {
+  const normalizedUsername = String(username || '').trim().toLowerCase();
+  return Object.values(metadata?.users || {}).find((user) =>
+    user?.enabled !== false &&
+    user?.isAdmin === true &&
+    user?.authType === 'local' &&
+    String(user.username || '').toLowerCase() === normalizedUsername &&
+    timingSafeStringEqual(password || '', user.password || '')
+  ) || null;
+}
+
 function withTrailingSlash(input) {
   return input.endsWith('/') ? input : `${input}/`;
 }
@@ -1828,6 +2182,8 @@ function buildSettingsResponse(settings) {
   return {
     settings: {
       hostname: settings.hostname,
+      browseShareName: browseShareName(settings),
+      browseShareEnabled: settings.browseShareEnabled !== false,
       rootShareName: settings.rootShareName,
       smbPublicPort: effectiveSmbPublicPort(settings),
       smbEnabled: isSmbFeatureEnabled(settings),
@@ -1891,9 +2247,9 @@ function buildSmbUrls(host, settings, disk) {
   const port = effectiveSmbPublicPort(settings);
   const { serverWithPort } = normalizedServerWithPort(host, port, 445);
   return {
-    rootShareUrl: `smb://${serverWithPort}/${settings.rootShareName}`,
+    rootShareUrl: `smb://${serverWithPort}/${browseShareName(settings)}`,
     diskShareUrl: `smb://${serverWithPort}/${disk.smbShareName}`,
-    rootSubdirUrl: `smb://${serverWithPort}/${settings.rootShareName}/${disk.id}`
+    rootSubdirUrl: `smb://${serverWithPort}/${browseShareName(settings)}/${disk.id}`
   };
 }
 
@@ -1901,10 +2257,58 @@ function buildSftpUrls(host, settings, disk) {
   const { serverWithPort } = normalizedServerWithPort(host, sftpPort, 22);
   const drivePath = sftpManager.visibleDrivePath();
   return {
-    sftpUrl: `sftp://${encodeURIComponent(disk.sftpUsername)}@${serverWithPort}${drivePath}`,
-    sftpPath: drivePath,
+    sftpUrl: disk.accessMode === 'legacy-per-share' ? `sftp://${encodeURIComponent(disk.sftpUsername)}@${serverWithPort}${drivePath}` : '',
+    sftpPath: disk.accessMode === 'legacy-per-share' ? drivePath : `${drivePath}/${disk.smbShareName}`,
     sftpEnabled: isSftpFeatureEnabled(settings)
   };
+}
+
+function requestedAccessMode(payload, fallback = 'legacy-per-share') {
+  if (payload?.accessMode !== undefined) {
+    return normalizeAccessMode(payload.accessMode, fallback);
+  }
+  const policy = payload?.accessPolicy;
+  const hasCentralAssignments = Boolean(
+    policy?.smb?.userIds?.length ||
+    policy?.smb?.groupIds?.length ||
+    policy?.sftp?.userIds?.length ||
+    policy?.sftp?.groupIds?.length ||
+    payload?.smbUserIds?.length ||
+    payload?.smbGroupIds?.length ||
+    payload?.sftpUserIds?.length ||
+    payload?.sftpGroupIds?.length
+  );
+  return hasCentralAssignments ? 'centralized' : fallback;
+}
+
+function incomingAccessPolicy(payload, fallback = emptyAccessPolicy()) {
+  return normalizeAccessPolicy(payload?.accessPolicy || {
+    smbUserIds: payload?.smbUserIds,
+    smbGroupIds: payload?.smbGroupIds,
+    sftpUserIds: payload?.sftpUserIds,
+    sftpGroupIds: payload?.sftpGroupIds
+  }, fallback);
+}
+
+function assertUniqueCentralProtocolUsername(metadataLike, username, excludeUserId = '') {
+  const normalized = sanitizeUsername(username);
+  for (const user of Object.values(metadataLike?.users || {})) {
+    if (!user || user.id === excludeUserId) {
+      continue;
+    }
+    if (sanitizeUsername(user.protocolUsername) === normalized) {
+      throw Object.assign(new Error(`Central protocol username already in use: ${normalized}`), { statusCode: 409 });
+    }
+  }
+  for (const disk of Object.values(metadataLike?.disks || {})) {
+    if (!disk) {
+      continue;
+    }
+    if (sanitizeUsername(disk.smbUsername) === normalized || sanitizeUsername(disk.sftpUsername) === normalized) {
+      throw Object.assign(new Error(`Protocol username conflicts with an existing legacy share credential: ${normalized}`), { statusCode: 409 });
+    }
+  }
+  return normalized;
 }
 
 function resolveStoragePath(payload, diskId, metadata) {
@@ -1953,11 +2357,54 @@ function resolveStoragePath(payload, diskId, metadata) {
   throw Object.assign(new Error(`Unsupported storageMode: ${storageMode}`), { statusCode: 400 });
 }
 
-function diskForResponse(disk, settings, host) {
+function diskForResponse(disk, settings, host, metadata = null) {
+  const usersById = new Map(Object.entries(metadata?.users || {}));
+  const groupsById = new Map(Object.entries(metadata?.groups || {}));
+  const assignedSmbUsers = resolveAssignedUsers({ share: disk, usersById, groupsById, protocol: 'smb' });
+  const assignedSftpUsers = resolveAssignedUsers({ share: disk, usersById, groupsById, protocol: 'sftp' });
+  const assignedGroupIds = new Set([
+    ...(disk.accessPolicy?.smb?.groupIds || []),
+    ...(disk.accessPolicy?.sftp?.groupIds || [])
+  ]);
+  const assignedGroups = [...assignedGroupIds].map((groupId) => groupsById.get(groupId)).filter(Boolean).map(groupForResponse);
+  const sftpUrls = buildSftpUrls(host, settings, disk);
   return {
     ...disk,
     ...buildSmbUrls(host, settings, disk),
-    ...buildSftpUrls(host, settings, disk)
+    ...sftpUrls,
+    shareType: 'share',
+    smb: {
+      shareName: disk.smbShareName,
+      url: buildSmbUrls(host, settings, disk).diskShareUrl,
+      rootUrl: buildSmbUrls(host, settings, disk).rootShareUrl,
+      rootSubdirUrl: buildSmbUrls(host, settings, disk).rootSubdirUrl,
+      profile: 'mac-share',
+      timeMachineEnabled: disk.timeMachineEnabled === true,
+      timeMachineQuotaGb: Number(disk.timeMachineQuotaGb || 0),
+      authMode: disk.accessMode === 'centralized' ? 'centralized' : 'legacy-per-share',
+      lastAppliedAt: disk.smbLastAppliedAt || null,
+      lastAppliedError: disk.smbLastAppliedError || null,
+      users: disk.accessMode === 'centralized' ? assignedSmbUsers.map((user) => centralUserForResponse(user)) : [],
+      legacyUsername: disk.accessMode === 'legacy-per-share' ? disk.smbUsername : '',
+      legacyPassword: disk.accessMode === 'legacy-per-share' ? disk.smbPassword : ''
+    },
+    sftp: {
+      enabled: isSftpFeatureEnabled(settings),
+      url: sftpUrls.sftpUrl || '',
+      path: sftpUrls.sftpPath,
+      authMode: disk.accessMode === 'centralized' ? 'centralized' : 'legacy-per-share',
+      lastAppliedAt: disk.sftpLastAppliedAt || null,
+      lastAppliedError: disk.sftpLastAppliedError || null,
+      users: disk.accessMode === 'centralized' ? assignedSftpUsers.map((user) => centralUserForResponse(user)) : [],
+      legacyUsername: disk.accessMode === 'legacy-per-share' ? disk.sftpUsername : '',
+      legacyPassword: disk.accessMode === 'legacy-per-share' ? disk.sftpPassword : ''
+    },
+    access: {
+      mode: disk.accessMode,
+      users: [...new Map([...assignedSmbUsers, ...assignedSftpUsers].map((user) => [user.id, centralUserForResponse(user)])).values()],
+      groups: assignedGroups,
+      policy: normalizeAccessPolicy(disk.accessPolicy, emptyAccessPolicy())
+    }
   };
 }
 
@@ -1966,13 +2413,59 @@ function hasSambaDiskConfig(disk) {
     disk &&
     typeof disk.smbShareName === 'string' &&
     disk.smbShareName &&
-    typeof disk.smbUsername === 'string' &&
-    disk.smbUsername &&
-    typeof disk.smbPassword === 'string' &&
-    disk.smbPassword &&
     typeof disk.storagePath === 'string' &&
     disk.storagePath
   );
+}
+
+function resolveShareUsers(metadata, disk, protocol) {
+  const usersById = new Map(resolveCentralUsers(metadata).map((user) => [user.id, user]));
+  const groupsById = new Map(Object.entries(metadata?.groups || {}));
+  return resolveAssignedUsers({ share: disk, usersById, groupsById, protocol });
+}
+
+function resolveCentralUsers(metadata, { protocolReadyOnly = false, enabledOnly = false } = {}) {
+  const groupMembershipByUserId = new Map();
+  for (const group of Object.values(metadata?.groups || {})) {
+    for (const memberUserId of normalizeMemberUserIds(group?.memberUserIds)) {
+      const current = groupMembershipByUserId.get(memberUserId) || [];
+      current.push(group.id);
+      groupMembershipByUserId.set(memberUserId, current);
+    }
+  }
+  return Object.values(metadata?.users || {})
+    .filter((user) => !enabledOnly || user?.enabled !== false)
+    .filter((user) => !protocolReadyOnly || (user?.protocolUsername && user?.protocolPassword))
+    .map((user) => ({
+      ...user,
+      groupIds: groupMembershipByUserId.get(user.id) || []
+    }));
+}
+
+function shareUsesCentralizedAccess(disk) {
+  return normalizeAccessMode(disk?.accessMode, 'legacy-per-share') === 'centralized';
+}
+
+function resolveSambaApplyUsers(metadata, disk) {
+  if (!shareUsesCentralizedAccess(disk)) {
+    return [{
+      id: disk.id,
+      username: disk.smbUsername,
+      password: disk.smbPassword
+    }];
+  }
+
+  const users = resolveShareUsers(metadata, disk, 'smb')
+    .map((user) => ({
+      id: user.id,
+      username: user.protocolUsername,
+      password: user.protocolPassword
+    }))
+    .filter((user) => user.username && user.password);
+  if (users.length === 0) {
+    throw Object.assign(new Error(`Share ${disk.id} uses centralized SMB access but has no assigned users or groups`), { statusCode: 400 });
+  }
+  return users;
 }
 
 async function assertDiskSambaCompatibility(disk, settings) {
@@ -1992,13 +2485,16 @@ async function assertDiskSambaCompatibility(disk, settings) {
   }));
 }
 
-async function ensureDiskShareApplied(disk, settings) {
+async function ensureDiskShareApplied(disk, settings, metadata = null) {
   if (!hasSambaDiskConfig(disk)) {
     throw new Error(`Disk ${disk?.id || '<unknown>'} is missing SMB configuration fields`);
   }
   await assertDiskSambaCompatibility(disk, settings);
-  const result = await sambaManager.applyDisk(disk);
-  const rootResult = await sambaManager.applyRootShare(settings.rootShareName, smbShareRoot);
+  const smbUsers = resolveSambaApplyUsers(metadata, disk);
+  const result = await sambaManager.applyDisk(disk, { users: smbUsers });
+  const rootResult = settings?.browseShareEnabled === false
+    ? { applied: false, reason: 'Browse share disabled in settings' }
+    : await sambaManager.applyRootShare(browseShareName(settings), smbShareRoot);
   return { disk: result, root: rootResult };
 }
 
@@ -2015,6 +2511,9 @@ function hasSftpDiskConfig(disk) {
 }
 
 async function ensureDiskSftpApplied(disk, metadata) {
+  if (shareUsesCentralizedAccess(disk)) {
+    return sftpManager.applyCentralUsers(resolveCentralUsers(metadata, { protocolReadyOnly: true, enabledOnly: true }), Object.values(metadata?.disks || {}));
+  }
   if (!hasSftpDiskConfig(disk)) {
     throw new Error(`Disk ${disk?.id || '<unknown>'} is missing SFTP configuration fields`);
   }
@@ -2038,7 +2537,7 @@ async function applyAllDiskSharesOnStartup(metadata) {
     try {
       await ensureDiskStoragePathReady(disk, metadata.settings);
       await assertDiskSambaCompatibility(disk, metadata.settings);
-      const result = await sambaManager.applyDisk(disk);
+      const result = await sambaManager.applyDisk(disk, { users: resolveSambaApplyUsers(metadata, disk) });
       applyResults[diskId] = {
         applied: result.applied === true,
         error: result.applied ? null : result.reason || 'Not applied'
@@ -2050,6 +2549,9 @@ async function applyAllDiskSharesOnStartup(metadata) {
   }
 
   if (Object.keys(applyResults).length === 0) {
+    if (metadata.settings?.browseShareEnabled !== false) {
+      await sambaManager.applyRootShare(browseShareName(metadata.settings), smbShareRoot).catch(() => { });
+    }
     return;
   }
 
@@ -2073,7 +2575,13 @@ async function applyAllDiskSftpOnStartup(metadata) {
 
   const applyResults = {};
   const now = new Date().toISOString();
+  let shouldApplyCentralUsers = false;
   for (const [diskId, disk] of Object.entries(metadata.disks || {})) {
+    if (shareUsesCentralizedAccess(disk)) {
+      shouldApplyCentralUsers = true;
+      applyResults[diskId] = { applied: true, error: null };
+      continue;
+    }
     if (!hasSftpDiskConfig(disk)) {
       applyResults[diskId] = { applied: false, error: 'Disk is missing SFTP configuration fields' };
       continue;
@@ -2085,6 +2593,18 @@ async function applyAllDiskSftpOnStartup(metadata) {
     } catch (error) {
       applyResults[diskId] = { applied: false, error: error.message };
       console.error(`Failed to apply sftp config for disk ${diskId}:`, error.message);
+    }
+  }
+
+  if (shouldApplyCentralUsers) {
+    try {
+      await sftpManager.applyCentralUsers(resolveCentralUsers(metadata, { protocolReadyOnly: true, enabledOnly: true }), Object.values(metadata.disks || {}));
+    } catch (error) {
+      for (const [diskId, disk] of Object.entries(metadata.disks || {})) {
+        if (shareUsesCentralizedAccess(disk)) {
+          applyResults[diskId] = { applied: false, error: error.message };
+        }
+      }
     }
   }
 
@@ -2103,6 +2623,27 @@ async function applyAllDiskSftpOnStartup(metadata) {
     }
     return draft;
   });
+}
+
+async function applyCentralizedShareAccess(metadata) {
+  if (canApplySamba(metadata.settings)) {
+    for (const disk of Object.values(metadata.disks || {})) {
+      if (!shareUsesCentralizedAccess(disk)) {
+        continue;
+      }
+      try {
+        await ensureDiskStoragePathReady(disk, metadata.settings);
+        await ensureDiskShareApplied(disk, metadata.settings, metadata);
+      } catch (error) {
+        console.error(`Failed to re-apply centralized samba access for share ${disk.id}:`, error.message);
+      }
+    }
+  }
+  if (isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
+    await sftpManager.applyCentralUsers(resolveCentralUsers(metadata, { protocolReadyOnly: true, enabledOnly: true }), Object.values(metadata.disks || {})).catch((error) => {
+      console.error('Failed to re-apply centralized sftp access:', error.message);
+    });
+  }
 }
 
 async function getDiskFilesPath(disk) {
@@ -2303,7 +2844,8 @@ async function handleAdminApi(req, res, url) {
   if (req.method === 'POST' && url.pathname === '/admin/api/login') {
     const metadata = await loadMetadata();
     const configSummary = effectiveConfigSourceSummary(metadata.settings);
-    if (configSummary.values.adminAuthMode !== 'local' && configSummary.values.securityBreakGlassEnabled === false) {
+    const adminAuthMode = configSummary.values.adminAuthMode;
+    if (!['local', 'centralized'].includes(adminAuthMode) && configSummary.values.securityBreakGlassEnabled === false) {
       throw Object.assign(
         new Error('Local username/password login is disabled. Use configured SSO provider or re-enable break-glass access.'),
         { statusCode: 403 }
@@ -2311,6 +2853,14 @@ async function handleAdminApi(req, res, url) {
     }
 
     const payload = await readJsonBody(req);
+    const centralAdminUser = findCentralAdminUser(metadata, payload.username, payload.password);
+    if (adminAuthMode === 'centralized' && centralAdminUser) {
+      const token = createSession(centralAdminUser.username, resolveAdminSessionSeconds(metadata.settings));
+      setSessionCookie(res, token, resolveAdminSessionSeconds(metadata.settings));
+      sendJson(res, 200, { ok: true, username: centralAdminUser.username });
+      return;
+    }
+
     const creds = await getEffectiveAdminCreds();
     const isValid = timingSafeStringEqual(payload.username || '', creds.username) && timingSafeStringEqual(payload.password || '', creds.password);
 
@@ -2463,7 +3013,12 @@ async function handleAdminApi(req, res, url) {
         settingEnabled: mountManagementEnabled,
         effectiveEnabled: mountsStatus.enabled && mountManagementEnabled
       },
-      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
+      shares: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata)),
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata)),
+      users: resolveCentralUsers(metadata).map((user) => centralUserForResponse(user)),
+      groups: Object.values(metadata.groups || {}).map((group) => groupForResponse(group)),
+      identityProviders: Object.values(metadata.identityProviders || {}).map((provider) => identityProviderForResponse(provider)),
+      groupMappings: Object.values(metadata.groupMappings || {})
     });
     return;
   }
@@ -2496,8 +3051,12 @@ async function handleAdminApi(req, res, url) {
       if (payload.hostname !== undefined) {
         draft.settings.hostname = String(payload.hostname).trim();
       }
-      if (payload.rootShareName) {
-        draft.settings.rootShareName = sanitizeShareName(payload.rootShareName);
+      if (payload.browseShareName || payload.rootShareName) {
+        draft.settings.browseShareName = sanitizeShareName(payload.browseShareName || payload.rootShareName);
+        draft.settings.rootShareName = draft.settings.browseShareName;
+      }
+      if (payload.browseShareEnabled !== undefined) {
+        draft.settings.browseShareEnabled = Boolean(payload.browseShareEnabled);
       }
       if (payload.smbPublicPort !== undefined) {
         draft.settings.smbPublicPort = Number(payload.smbPublicPort || 445);
@@ -2565,8 +3124,8 @@ async function handleAdminApi(req, res, url) {
     });
     assertPostgresConfigured(metadata.settings);
 
-    if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
-      await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
+    if (payload.applySamba !== false && canApplySamba(metadata.settings) && metadata.settings.browseShareEnabled !== false) {
+      await sambaManager.applyRootShare(browseShareName(metadata.settings), smbShareRoot);
       await applyAllDiskSharesOnStartup(metadata);
     }
 
@@ -2598,8 +3157,12 @@ async function handleAdminApi(req, res, url) {
       if (payload.adminPassword) {
         draft.settings.adminPassword = String(payload.adminPassword);
       }
-      if (payload.rootShareName) {
-        draft.settings.rootShareName = sanitizeShareName(payload.rootShareName);
+      if (payload.browseShareName || payload.rootShareName) {
+        draft.settings.browseShareName = sanitizeShareName(payload.browseShareName || payload.rootShareName);
+        draft.settings.rootShareName = draft.settings.browseShareName;
+      }
+      if (payload.browseShareEnabled !== undefined) {
+        draft.settings.browseShareEnabled = Boolean(payload.browseShareEnabled);
       }
       if (payload.smbPublicPort !== undefined) {
         draft.settings.smbPublicPort = Number(payload.smbPublicPort || 445);
@@ -2664,13 +3227,284 @@ async function handleAdminApi(req, res, url) {
     });
     assertPostgresConfigured(metadata.settings);
 
-    if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
-      await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot);
+    if (payload.applySamba !== false && canApplySamba(metadata.settings) && metadata.settings.browseShareEnabled !== false) {
+      await sambaManager.applyRootShare(browseShareName(metadata.settings), smbShareRoot);
       await applyAllDiskSharesOnStartup(metadata);
     }
 
     sendJson(res, 200, buildSettingsResponse(metadata.settings));
     return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/api/users') {
+    const metadata = await loadMetadata();
+    sendJson(res, 200, { users: resolveCentralUsers(metadata).map((user) => centralUserForResponse(user)) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/api/users') {
+    const payload = await readJsonBody(req);
+    if (!payload.username || typeof payload.username !== 'string') {
+      throw Object.assign(new Error('Field `username` is required'), { statusCode: 400 });
+    }
+    const now = new Date().toISOString();
+    const userId = payload.id || randomUUID();
+    const metadata = await updateMetadata((draft) => {
+      if (draft.users[userId]) {
+        throw Object.assign(new Error(`User id already exists: ${userId}`), { statusCode: 409 });
+      }
+      const username = sanitizeUsername(payload.username);
+      if (Object.values(draft.users).some((user) => user.username === username)) {
+        throw Object.assign(new Error(`Username already in use: ${username}`), { statusCode: 409 });
+      }
+      const protocolUsername = assertUniqueCentralProtocolUsername(draft, payload.protocolUsername || username);
+      draft.users[userId] = {
+        id: userId,
+        username,
+        displayName: payload.displayName || payload.username,
+        authType: normalizeIdentityProviderType(payload.authType || 'local', 'local'),
+        password: payload.password || '',
+        protocolUsername,
+        protocolPassword: payload.protocolPassword || randomPassword(),
+        enabled: payload.enabled !== false,
+        isAdmin: payload.isAdmin === true,
+        smbEnabled: payload.smbEnabled !== false,
+        sftpEnabled: payload.sftpEnabled !== false,
+        identityProviderId: payload.identityProviderId || '',
+        externalSubject: payload.externalSubject || '',
+        createdAt: now,
+        updatedAt: now
+      };
+      syncUserGroupMembership(draft, userId, payload.groupIds || []);
+      return draft;
+    });
+    await applyCentralizedShareAccess(metadata);
+    sendJson(res, 201, { user: centralUserForResponse(resolveCentralUsers(metadata).find((user) => user.id === userId) || metadata.users[userId], { includeSecrets: true }) });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/api/groups') {
+    const metadata = await loadMetadata();
+    sendJson(res, 200, { groups: Object.values(metadata.groups || {}).map((group) => groupForResponse(group)) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/api/groups') {
+    const payload = await readJsonBody(req);
+    if (!payload.name || typeof payload.name !== 'string') {
+      throw Object.assign(new Error('Field `name` is required'), { statusCode: 400 });
+    }
+    const now = new Date().toISOString();
+    const groupId = payload.id || randomUUID();
+    const metadata = await updateMetadata((draft) => {
+      if (draft.groups[groupId]) {
+        throw Object.assign(new Error(`Group id already exists: ${groupId}`), { statusCode: 409 });
+      }
+      draft.groups[groupId] = {
+        id: groupId,
+        name: payload.name,
+        description: payload.description || '',
+        memberUserIds: normalizeMemberUserIds(payload.memberUserIds || []),
+        createdAt: now,
+        updatedAt: now
+      };
+      return draft;
+    });
+    await applyCentralizedShareAccess(metadata);
+    sendJson(res, 201, { group: groupForResponse(metadata.groups[groupId]) });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/admin/api/identity-providers') {
+    const metadata = await loadMetadata();
+    sendJson(res, 200, { identityProviders: Object.values(metadata.identityProviders || {}).map((provider) => identityProviderForResponse(provider)) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/admin/api/identity-providers') {
+    const payload = await readJsonBody(req);
+    if (!payload.name || typeof payload.name !== 'string') {
+      throw Object.assign(new Error('Field `name` is required'), { statusCode: 400 });
+    }
+    const providerId = payload.id || randomUUID();
+    const now = new Date().toISOString();
+    const metadata = await updateMetadata((draft) => {
+      if (draft.identityProviders[providerId]) {
+        throw Object.assign(new Error(`Identity provider id already exists: ${providerId}`), { statusCode: 409 });
+      }
+      draft.identityProviders[providerId] = {
+        id: providerId,
+        name: payload.name,
+        type: normalizeIdentityProviderType(payload.type || 'local', 'local'),
+        enabled: payload.enabled !== false,
+        config: payload.config && typeof payload.config === 'object' ? payload.config : {},
+        createdAt: now,
+        updatedAt: now
+      };
+      return draft;
+    });
+    sendJson(res, 201, { identityProvider: identityProviderForResponse(metadata.identityProviders[providerId]) });
+    return;
+  }
+
+  const identitySegments = url.pathname.split('/').filter(Boolean);
+  if (identitySegments[0] === 'admin' && identitySegments[1] === 'api' && identitySegments[2] === 'users' && identitySegments[3]) {
+    const userId = identitySegments[3];
+    if (req.method === 'PUT' && identitySegments.length === 4) {
+      const payload = await readJsonBody(req);
+      const metadata = await updateMetadata((draft) => {
+        const user = draft.users[userId];
+        if (!user) {
+          throw Object.assign(new Error(`Unknown user id: ${userId}`), { statusCode: 404 });
+        }
+        if (payload.username !== undefined) {
+          const username = sanitizeUsername(payload.username);
+          if (Object.values(draft.users).some((other) => other.id !== userId && other.username === username)) {
+            throw Object.assign(new Error(`Username already in use: ${username}`), { statusCode: 409 });
+          }
+          user.username = username;
+        }
+        if (payload.displayName !== undefined) {
+          user.displayName = payload.displayName || user.username;
+        }
+        if (payload.authType !== undefined) {
+          user.authType = normalizeIdentityProviderType(payload.authType, user.authType || 'local');
+        }
+        if (payload.password !== undefined) {
+          user.password = String(payload.password || '');
+        }
+        if (payload.protocolUsername !== undefined) {
+          user.protocolUsername = assertUniqueCentralProtocolUsername(draft, payload.protocolUsername, userId);
+        }
+        if (payload.protocolPassword !== undefined) {
+          user.protocolPassword = String(payload.protocolPassword || '');
+        }
+        if (payload.enabled !== undefined) {
+          user.enabled = Boolean(payload.enabled);
+        }
+        if (payload.isAdmin !== undefined) {
+          user.isAdmin = Boolean(payload.isAdmin);
+        }
+        if (payload.smbEnabled !== undefined) {
+          user.smbEnabled = Boolean(payload.smbEnabled);
+        }
+        if (payload.sftpEnabled !== undefined) {
+          user.sftpEnabled = Boolean(payload.sftpEnabled);
+        }
+        if (payload.identityProviderId !== undefined) {
+          user.identityProviderId = payload.identityProviderId || '';
+        }
+        if (payload.externalSubject !== undefined) {
+          user.externalSubject = payload.externalSubject || '';
+        }
+        if (payload.groupIds !== undefined) {
+          syncUserGroupMembership(draft, userId, payload.groupIds);
+        }
+        user.updatedAt = new Date().toISOString();
+        return draft;
+      });
+      await applyCentralizedShareAccess(metadata);
+      sendJson(res, 200, { user: centralUserForResponse(resolveCentralUsers(metadata).find((user) => user.id === userId) || metadata.users[userId]) });
+      return;
+    }
+
+    if (req.method === 'DELETE' && identitySegments.length === 4) {
+      const metadata = await loadMetadata();
+      const user = metadata.users[userId];
+      if (!user) {
+        throw Object.assign(new Error(`Unknown user id: ${userId}`), { statusCode: 404 });
+      }
+      const updatedMetadata = await updateMetadata((draft) => {
+        delete draft.users[userId];
+        syncUserGroupMembership(draft, userId, []);
+        return draft;
+      });
+      await sftpManager.deleteUser(user.protocolUsername).catch(() => { });
+      await applyCentralizedShareAccess(updatedMetadata);
+      sendNoContent(res);
+      return;
+    }
+  }
+
+  if (identitySegments[0] === 'admin' && identitySegments[1] === 'api' && identitySegments[2] === 'groups' && identitySegments[3]) {
+    const groupId = identitySegments[3];
+    if (req.method === 'PUT' && identitySegments.length === 4) {
+      const payload = await readJsonBody(req);
+      const metadata = await updateMetadata((draft) => {
+        const group = draft.groups[groupId];
+        if (!group) {
+          throw Object.assign(new Error(`Unknown group id: ${groupId}`), { statusCode: 404 });
+        }
+        if (payload.name !== undefined) {
+          group.name = payload.name;
+        }
+        if (payload.description !== undefined) {
+          group.description = payload.description || '';
+        }
+        if (payload.memberUserIds !== undefined) {
+          group.memberUserIds = normalizeMemberUserIds(payload.memberUserIds);
+        }
+        group.updatedAt = new Date().toISOString();
+        return draft;
+      });
+      await applyCentralizedShareAccess(metadata);
+      sendJson(res, 200, { group: groupForResponse(metadata.groups[groupId]) });
+      return;
+    }
+
+    if (req.method === 'DELETE' && identitySegments.length === 4) {
+      const metadata = await updateMetadata((draft) => {
+        if (!draft.groups[groupId]) {
+          throw Object.assign(new Error(`Unknown group id: ${groupId}`), { statusCode: 404 });
+        }
+        delete draft.groups[groupId];
+        return draft;
+      });
+      await applyCentralizedShareAccess(metadata);
+      sendNoContent(res);
+      return;
+    }
+  }
+
+  if (identitySegments[0] === 'admin' && identitySegments[1] === 'api' && identitySegments[2] === 'identity-providers' && identitySegments[3]) {
+    const providerId = identitySegments[3];
+    if (req.method === 'PUT' && identitySegments.length === 4) {
+      const payload = await readJsonBody(req);
+      const metadata = await updateMetadata((draft) => {
+        const provider = draft.identityProviders[providerId];
+        if (!provider) {
+          throw Object.assign(new Error(`Unknown identity provider id: ${providerId}`), { statusCode: 404 });
+        }
+        if (payload.name !== undefined) {
+          provider.name = payload.name;
+        }
+        if (payload.type !== undefined) {
+          provider.type = normalizeIdentityProviderType(payload.type, provider.type || 'local');
+        }
+        if (payload.enabled !== undefined) {
+          provider.enabled = Boolean(payload.enabled);
+        }
+        if (payload.config !== undefined) {
+          provider.config = payload.config && typeof payload.config === 'object' ? payload.config : {};
+        }
+        provider.updatedAt = new Date().toISOString();
+        return draft;
+      });
+      sendJson(res, 200, { identityProvider: identityProviderForResponse(metadata.identityProviders[providerId]) });
+      return;
+    }
+
+    if (req.method === 'DELETE' && identitySegments.length === 4) {
+      await updateMetadata((draft) => {
+        if (!draft.identityProviders[providerId]) {
+          throw Object.assign(new Error(`Unknown identity provider id: ${providerId}`), { statusCode: 404 });
+        }
+        delete draft.identityProviders[providerId];
+        return draft;
+      });
+      sendNoContent(res);
+      return;
+    }
   }
 
   if (req.method === 'GET' && url.pathname === '/admin/api/mounts') {
@@ -2860,7 +3694,7 @@ async function handleAdminApi(req, res, url) {
     }
   }
 
-  if (req.method === 'POST' && url.pathname === '/admin/api/disks') {
+  if (req.method === 'POST' && (url.pathname === '/admin/api/disks' || url.pathname === '/admin/api/shares')) {
     const payload = await readJsonBody(req);
     if (!payload.name || typeof payload.name !== 'string') {
       throw Object.assign(new Error('Field `name` is required'), { statusCode: 400 });
@@ -2879,16 +3713,21 @@ async function handleAdminApi(req, res, url) {
         throw Object.assign(new Error(`Disk id already exists: ${diskId}`), { statusCode: 409 });
       }
 
-      const shareName = sanitizeShareName(payload.shareName || `tm-${payload.name}-${diskId.slice(0, 6)}`);
+      const shareName = sanitizeShareName(payload.shareName || payload.smbShareName || `share-${payload.name}-${diskId.slice(0, 6)}`);
       const shareExists = Object.values(draft.disks).some((disk) => disk.smbShareName === shareName);
       if (shareExists) {
         throw Object.assign(new Error(`Share name already in use: ${shareName}`), { statusCode: 409 });
       }
 
+      const accessMode = requestedAccessMode(payload, 'legacy-per-share');
       draft.disks[diskId] = {
         id: diskId,
         name: payload.name,
-        quotaGb: Number(payload.quotaGb || 0),
+        quotaGb: Number((payload.timeMachineQuotaGb ?? payload.quotaGb) || 0),
+        timeMachineEnabled: payload.timeMachineEnabled === true,
+        timeMachineQuotaGb: Number((payload.timeMachineQuotaGb ?? payload.quotaGb) || 0),
+        accessMode,
+        accessPolicy: incomingAccessPolicy(payload, emptyAccessPolicy()),
         storageMode: storage.storageMode,
         storageMountId: storage.storageMountId || null,
         storageBasePath: storage.storageBasePath,
@@ -2905,6 +3744,7 @@ async function handleAdminApi(req, res, url) {
         sftpLastAppliedAt: null,
         sftpLastAppliedError: null
       };
+      assertUniqueCentralProtocolUsername(draft, payload.protocolUsername || payload.smbUsername || draft.disks[diskId].smbUsername);
       const sftpUserExists = Object.values(draft.disks).some((disk) => disk.id !== diskId && disk.sftpUsername === draft.disks[diskId].sftpUsername);
       if (sftpUserExists) {
         throw Object.assign(new Error(`SFTP username already in use: ${draft.disks[diskId].sftpUsername}`), { statusCode: 409 });
@@ -2925,7 +3765,7 @@ async function handleAdminApi(req, res, url) {
     }
 
     if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
-      const applyResult = await ensureDiskShareApplied(disk, metadata.settings);
+      const applyResult = await ensureDiskShareApplied(disk, metadata.settings, metadata);
       await updateMetadata((draft) => {
         const current = draft.disks[diskId];
         if (!current) {
@@ -2959,12 +3799,13 @@ async function handleAdminApi(req, res, url) {
       method: req.method
     });
 
-    sendJson(res, 201, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
+    const share = diskForResponse(disk, metadata.settings, requestHost(req, metadata), metadata);
+    sendJson(res, 201, { share, disk: share });
     return;
   }
 
   const segments = url.pathname.split('/').filter(Boolean);
-  if (segments[0] === 'admin' && segments[1] === 'api' && segments[2] === 'disks' && segments[3]) {
+  if (segments[0] === 'admin' && segments[1] === 'api' && ['disks', 'shares'].includes(segments[2]) && segments[3]) {
     const diskId = segments[3];
 
     if (req.method === 'PUT' && segments.length === 4) {
@@ -2983,11 +3824,16 @@ async function handleAdminApi(req, res, url) {
         if (payload.name !== undefined) {
           disk.name = payload.name;
         }
-        if (payload.quotaGb !== undefined) {
-          disk.quotaGb = Number(payload.quotaGb || 0);
+        if (payload.timeMachineEnabled !== undefined) {
+          disk.timeMachineEnabled = Boolean(payload.timeMachineEnabled);
         }
-        if (payload.smbShareName !== undefined) {
-          const nextShare = sanitizeShareName(payload.smbShareName);
+        if (payload.timeMachineQuotaGb !== undefined || payload.quotaGb !== undefined) {
+          const nextQuota = Number((payload.timeMachineQuotaGb ?? payload.quotaGb) || 0);
+          disk.timeMachineQuotaGb = nextQuota;
+          disk.quotaGb = nextQuota;
+        }
+        if (payload.smbShareName !== undefined || payload.shareName !== undefined) {
+          const nextShare = sanitizeShareName(payload.smbShareName || payload.shareName);
           const shareExists = Object.values(draft.disks).some((other) => other.id !== diskId && other.smbShareName === nextShare);
           if (shareExists) {
             throw Object.assign(new Error(`Share name already in use: ${nextShare}`), { statusCode: 409 });
@@ -3004,6 +3850,10 @@ async function handleAdminApi(req, res, url) {
             throw Object.assign(new Error(`SFTP username already in use: ${nextSftpUsername}`), { statusCode: 409 });
           }
           disk.sftpUsername = nextSftpUsername;
+        }
+        if (payload.accessMode !== undefined || payload.accessPolicy !== undefined || payload.smbUserIds !== undefined || payload.smbGroupIds !== undefined || payload.sftpUserIds !== undefined || payload.sftpGroupIds !== undefined) {
+          disk.accessMode = requestedAccessMode(payload, disk.accessMode || 'legacy-per-share');
+          disk.accessPolicy = incomingAccessPolicy(payload, disk.accessPolicy || emptyAccessPolicy());
         }
         if (payload.storageMode || payload.storagePath || payload.storageSubdir) {
           const storage = resolveStoragePath(
@@ -3032,11 +3882,11 @@ async function handleAdminApi(req, res, url) {
       }
       await ensureDiskStoragePathReady(disk, metadata.settings);
       if (payload.applySamba !== false && canApplySamba(metadata.settings)) {
-        await ensureDiskShareApplied(disk, metadata.settings);
+        await ensureDiskShareApplied(disk, metadata.settings, metadata);
       }
       if (payload.applySftp !== false && isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
         const result = await ensureDiskSftpApplied(disk, metadata);
-        if (previousDisk.sftpUsername !== disk.sftpUsername) {
+        if (!shareUsesCentralizedAccess(disk) && previousDisk.sftpUsername !== disk.sftpUsername) {
           await sftpManager.deleteUser(previousDisk.sftpUsername).catch(() => { });
         }
         await updateMetadata((draft) => {
@@ -3050,7 +3900,8 @@ async function handleAdminApi(req, res, url) {
         });
       }
 
-      sendJson(res, 200, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
+      const share = diskForResponse(disk, metadata.settings, requestHost(req, metadata), metadata);
+      sendJson(res, 200, { share, disk: share });
       return;
     }
 
@@ -3070,8 +3921,11 @@ async function handleAdminApi(req, res, url) {
       });
 
       const disk = metadata.disks[diskId];
+      if (shareUsesCentralizedAccess(disk)) {
+        throw Object.assign(new Error('Legacy SMB password rotation is unavailable for centralized shares'), { statusCode: 400 });
+      }
       const result = canApplySamba(metadata.settings)
-        ? await ensureDiskShareApplied(disk, metadata.settings)
+        ? await ensureDiskShareApplied(disk, metadata.settings, metadata)
         : {
           disk: { applied: false, reason: 'SMB management is disabled in settings' },
           root: { applied: false, reason: 'SMB management is disabled in settings' }
@@ -3120,6 +3974,9 @@ async function handleAdminApi(req, res, url) {
       });
 
       const disk = metadata.disks[diskId];
+      if (shareUsesCentralizedAccess(disk)) {
+        throw Object.assign(new Error('Legacy SFTP password rotation is unavailable for centralized shares'), { statusCode: 400 });
+      }
       const result = isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled
         ? await ensureDiskSftpApplied(disk, metadata)
         : { applied: false, reason: 'SFTP management is disabled in settings' };
@@ -3156,7 +4013,7 @@ async function handleAdminApi(req, res, url) {
       if (!canApplySamba(metadata.settings)) {
         throw Object.assign(new Error('SMB management is disabled in settings'), { statusCode: 400 });
       }
-      const result = await ensureDiskShareApplied(disk, metadata.settings);
+      const result = await ensureDiskShareApplied(disk, metadata.settings, metadata);
       await updateMetadata((draft) => {
         const current = draft.disks[diskId];
         if (!current) {
@@ -3230,14 +4087,22 @@ async function handleAdminApi(req, res, url) {
         await sambaManager.removeDisk(disk).catch((error) => {
           console.error('Failed to remove samba share:', error.message);
         });
-        await sambaManager.applyRootShare(updatedMetadata.settings.rootShareName, smbShareRoot).catch((error) => {
+      }
+      if (updatedMetadata.settings.browseShareEnabled !== false && canApplySamba(metadata.settings)) {
+        await sambaManager.applyRootShare(browseShareName(updatedMetadata.settings), smbShareRoot).catch((error) => {
           console.error('Failed to apply root share:', error.message);
         });
       }
       if (sftpManager.enabled) {
-        await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch((error) => {
-          console.error('Failed to remove sftp drive config:', error.message);
-        });
+        if (shareUsesCentralizedAccess(disk)) {
+          await sftpManager.applyCentralUsers(resolveCentralUsers(updatedMetadata, { protocolReadyOnly: true, enabledOnly: true }), Object.values(updatedMetadata.disks)).catch((error) => {
+            console.error('Failed to re-apply centralized sftp config:', error.message);
+          });
+        } else {
+          await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch((error) => {
+            console.error('Failed to remove sftp drive config:', error.message);
+          });
+        }
       }
 
       appendLog({
@@ -3261,11 +4126,12 @@ async function handleAdminApi(req, res, url) {
 async function handleApi(req, res, url) {
   await assertApiAuth(req);
 
-  if (req.method === 'GET' && url.pathname === '/api/disks') {
+  if (req.method === 'GET' && (url.pathname === '/api/disks' || url.pathname === '/api/shares')) {
     const metadata = await loadMetadata();
     const host = requestHost(req, metadata);
     sendJson(res, 200, {
-      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
+      shares: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata)),
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata))
     });
     return;
   }
@@ -3277,9 +4143,13 @@ async function handleApi(req, res, url) {
     sendJson(res, 200, {
       smbShareRoot,
       smbEnabled: isSmbFeatureEnabled(metadata.settings),
+      browseShareEnabled: metadata.settings.browseShareEnabled !== false,
+      browseShareName: browseShareName(metadata.settings),
+      browseShareUrl: buildBrowseShareUrl(host, metadata.settings),
       rootShareName: metadata.settings.rootShareName,
-      rootShareUrl: `smb://${serverWithPort}/${metadata.settings.rootShareName}`,
-      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
+      rootShareUrl: `smb://${serverWithPort}/${browseShareName(metadata.settings)}`,
+      shares: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata)),
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata))
     });
     return;
   }
@@ -3289,12 +4159,13 @@ async function handleApi(req, res, url) {
     const host = requestHost(req, metadata);
     sendJson(res, 200, {
       ...sftpConnectionInfo(host, metadata.settings),
-      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host))
+      shares: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata)),
+      disks: Object.values(metadata.disks).map((disk) => diskForResponse(disk, metadata.settings, host, metadata))
     });
     return;
   }
 
-  if (req.method === 'POST' && url.pathname === '/api/disks') {
+  if (req.method === 'POST' && (url.pathname === '/api/disks' || url.pathname === '/api/shares')) {
     const payload = await readJsonBody(req);
     if (!payload.name || typeof payload.name !== 'string') {
       throw Object.assign(new Error('Field `name` is required'), { statusCode: 400 });
@@ -3316,12 +4187,16 @@ async function handleApi(req, res, url) {
       draft.disks[diskId] = {
         id: diskId,
         name: payload.name,
-        quotaGb: Number(payload.quotaGb || 0),
+        quotaGb: Number((payload.timeMachineQuotaGb ?? payload.quotaGb) || 0),
+        timeMachineEnabled: payload.timeMachineEnabled === true,
+        timeMachineQuotaGb: Number((payload.timeMachineQuotaGb ?? payload.quotaGb) || 0),
+        accessMode: requestedAccessMode(payload, 'legacy-per-share'),
+        accessPolicy: incomingAccessPolicy(payload, emptyAccessPolicy()),
         storageMode: storage.storageMode,
         storageMountId: storage.storageMountId || null,
         storageBasePath: storage.storageBasePath,
         storagePath: storage.storagePath,
-        smbShareName: sanitizeShareName(payload.shareName || `tm-${diskId.slice(0, 6)}`),
+        smbShareName: sanitizeShareName(payload.shareName || payload.smbShareName || `share-${diskId.slice(0, 6)}`),
         smbUsername: sanitizeUsername(payload.smbUsername || `tm_${diskId.slice(0, 8)}`),
         smbPassword: payload.smbPassword || randomPassword(),
         sftpUsername: sanitizeUsername(payload.sftpUsername || `sftp_${diskId.slice(0, 8)}`),
@@ -3352,7 +4227,7 @@ async function handleApi(req, res, url) {
     }
 
     if (payload.applySamba === true && canApplySamba(metadata.settings)) {
-      await ensureDiskShareApplied(disk, metadata.settings);
+      await ensureDiskShareApplied(disk, metadata.settings, metadata);
     }
     if (payload.applySftp === true && isSftpFeatureEnabled(metadata.settings) && sftpManager.enabled) {
       await ensureDiskSftpApplied(disk, metadata);
@@ -3368,12 +4243,13 @@ async function handleApi(req, res, url) {
       method: req.method
     });
 
-    sendJson(res, 201, { disk: diskForResponse(disk, metadata.settings, requestHost(req, metadata)) });
+    const share = diskForResponse(disk, metadata.settings, requestHost(req, metadata), metadata);
+    sendJson(res, 201, { share, disk: share });
     return;
   }
 
   const segments = url.pathname.split('/').filter(Boolean);
-  if (segments[0] === 'api' && segments[1] === 'disks' && segments[2]) {
+  if (segments[0] === 'api' && ['disks', 'shares'].includes(segments[1]) && segments[2]) {
     const diskId = segments[2];
 
     if (req.method === 'DELETE' && segments.length === 3) {
@@ -3390,10 +4266,16 @@ async function handleApi(req, res, url) {
       }
       if (canApplySamba(metadata.settings)) {
         await sambaManager.removeDisk(disk).catch(() => { });
-        await sambaManager.applyRootShare(updatedMetadata.settings.rootShareName, smbShareRoot).catch(() => { });
+        if (updatedMetadata.settings.browseShareEnabled !== false) {
+          await sambaManager.applyRootShare(browseShareName(updatedMetadata.settings), smbShareRoot).catch(() => { });
+        }
       }
       if (sftpManager.enabled) {
-        await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch(() => { });
+        if (shareUsesCentralizedAccess(disk)) {
+          await sftpManager.applyCentralUsers(resolveCentralUsers(updatedMetadata, { protocolReadyOnly: true, enabledOnly: true }), Object.values(updatedMetadata.disks)).catch(() => { });
+        } else {
+          await sftpManager.removeDisk(disk, Object.values(updatedMetadata.disks)).catch(() => { });
+        }
       }
       appendLog({
         source: 'api',
@@ -3545,9 +4427,11 @@ async function main() {
   await mountManager.start();
 
   if (canApplySamba(metadata.settings)) {
-    await sambaManager.applyRootShare(metadata.settings.rootShareName, smbShareRoot).catch((error) => {
-      console.error('Failed to apply root samba share:', error.message);
-    });
+    if (metadata.settings.browseShareEnabled !== false) {
+      await sambaManager.applyRootShare(browseShareName(metadata.settings), smbShareRoot).catch((error) => {
+        console.error('Failed to apply root samba share:', error.message);
+      });
+    }
     await applyAllDiskSharesOnStartup(metadata).catch((error) => {
       console.error('Failed to apply samba shares on startup:', error.message);
     });

@@ -83,13 +83,18 @@ export async function probeXattrSupport(storagePath) {
   }
 }
 
-export function buildDiskShareConfig(disk, streamsBackend) {
-  const quotaLine = Number(disk.quotaGb) > 0 ? `fruit:time machine max size = ${Math.floor(Number(disk.quotaGb))}G\n` : '';
+export function buildDiskShareConfig(disk, streamsBackend, options = {}) {
+  const validUsers = Array.isArray(options.users) && options.users.length > 0 ? options.users.join(' ') : disk.smbUsername;
+  const timeMachineEnabled = disk.timeMachineEnabled === true;
+  const quotaSource = disk.timeMachineQuotaGb !== undefined ? disk.timeMachineQuotaGb : disk.quotaGb;
+  const quotaLine = timeMachineEnabled && Number(quotaSource) > 0 ? `fruit:time machine max size = ${Math.floor(Number(quotaSource))}G\n` : '';
   const shareVfsObjects = vfsObjects(streamsBackend);
   const profile = fruitProfile(streamsBackend);
+  const timeMachineLine = timeMachineEnabled ? 'fruit:time machine = yes\n' : '';
+  const durableHandlesLine = timeMachineEnabled ? 'durable handles = yes\n' : '';
   return `[${disk.smbShareName}]
 path = ${disk.storagePath}
-valid users = ${disk.smbUsername}
+valid users = ${validUsers}
 guest ok = no
 force user = root
 force group = root
@@ -99,15 +104,14 @@ create mask = 0660
 directory mask = 0770
 ea support = yes
 vfs objects = ${shareVfsObjects}
-fruit:time machine = yes
-fruit:resource = ${profile.resource}
+${timeMachineLine}fruit:resource = ${profile.resource}
 fruit:metadata = ${profile.metadata}
 fruit:posix_rename = yes
 fruit:encoding = ${profile.encoding}
 fruit:veto_appledouble = no
 fruit:wipe_intentionally_left_blank_rfork = yes
 fruit:delete_empty_adfiles = yes
-${quotaLine}durable handles = yes
+${quotaLine}${durableHandlesLine}
 kernel oplocks = no
 kernel share modes = no
 posix locking = no
@@ -167,19 +171,22 @@ export class SambaManager {
     return this.streamsBackend;
   }
 
-  async applyDisk(disk) {
+  async applyDisk(disk, options = {}) {
     if (!this.enabled) {
       return { applied: false, reason: 'Samba management disabled by VPS_SAMBA_MANAGE_ENABLED' };
     }
 
     await mkdir(this.confDir, { recursive: true });
     await this.ensureIncludeLine();
-    await this.ensureSmbUser(disk.smbUsername, disk.smbPassword);
-    await this.writeShareConfig(disk);
+    const users = Array.isArray(options.users) && options.users.length > 0 ? options.users : [{ username: disk.smbUsername, password: disk.smbPassword }];
+    for (const user of users) {
+      await this.ensureSmbUser(user.username, user.password);
+    }
+    await this.writeShareConfig(disk, users.map((user) => user.username));
     await this.syncGeneratedConfig();
     await this.restartSamba();
 
-    return { applied: true, share: disk.smbShareName, user: disk.smbUsername };
+    return { applied: true, share: disk.smbShareName, users: users.map((user) => user.username) };
   }
 
   async removeDisk(disk) {
@@ -237,12 +244,12 @@ export class SambaManager {
     await runCommand('sh', ['-lc', cmd]);
   }
 
-  async writeShareConfig(disk) {
+  async writeShareConfig(disk, users = []) {
     await mkdir(disk.storagePath, { recursive: true });
     await runCommand('sh', ['-lc', `chown -R root:root ${shellQuote(disk.storagePath)} && chmod 0770 ${shellQuote(disk.storagePath)}`]).catch(() => {
       // Best-effort in case storagePath is a managed cloud mount with restricted ownership semantics.
     });
-    await writeFile(this.shareFilePath(disk), buildDiskShareConfig(disk, this.streamsBackend), 'utf8');
+    await writeFile(this.shareFilePath(disk), buildDiskShareConfig(disk, this.streamsBackend, { users }), 'utf8');
   }
 
   async syncGeneratedConfig() {

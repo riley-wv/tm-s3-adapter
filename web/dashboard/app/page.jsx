@@ -4,7 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const DEFAULT_DISK_FORM = {
   name: '',
-  quotaGb: '0',
+  timeMachineEnabled: false,
+  timeMachineQuotaGb: '0',
+  accessMode: 'legacy-per-share',
+  smbUserIds: '',
+  smbGroupIds: '',
+  sftpUserIds: '',
+  sftpGroupIds: '',
   storageMode: 'local',
   storageMountId: '',
   storageSubdir: '',
@@ -43,6 +49,8 @@ const DEFAULT_SETTINGS_FORM = {
   adminSessionSeconds: '43200',
   hostname: '',
   rootShareName: 'timemachine',
+  browseShareName: 'timemachine',
+  browseShareEnabled: true,
   smbPublicPort: '445',
   smbEnabled: true,
   sftpEnabled: true,
@@ -82,6 +90,43 @@ const DEFAULT_SETTINGS_FORM = {
   postgresUser: 'tm_adapter',
   postgresPassword: '',
   postgresSslMode: 'disable'
+};
+
+const DEFAULT_USER_FORM = {
+  username: '',
+  displayName: '',
+  authType: 'local',
+  password: '',
+  protocolUsername: '',
+  protocolPassword: '',
+  groupIds: '',
+  enabled: true,
+  isAdmin: false,
+  smbEnabled: true,
+  sftpEnabled: true,
+  identityProviderId: '',
+  externalSubject: ''
+};
+
+const DEFAULT_GROUP_FORM = {
+  name: '',
+  description: '',
+  memberUserIds: ''
+};
+
+const DEFAULT_PROVIDER_FORM = {
+  name: '',
+  type: 'oidc',
+  enabled: true,
+  issuer: '',
+  clientId: '',
+  clientSecret: '',
+  scopes: '',
+  directoryUrl: '',
+  directoryDomain: '',
+  directoryRealm: '',
+  directoryBindDn: '',
+  directoryBindPassword: ''
 };
 
 const MAX_DASHBOARD_LOGS = 1000;
@@ -191,6 +236,17 @@ function formatTimestamp(value) {
   return new Date(value).toLocaleString();
 }
 
+function parseIdList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function formatIdList(values) {
+  return Array.isArray(values) ? values.join(', ') : '';
+}
+
 function normalizeLogLevel(value) {
   const level = String(value || '').toLowerCase();
   if (level === 'error') return 'error';
@@ -262,6 +318,8 @@ export default function DashboardPage() {
     vpsCacheDir: '/data/vps/rclone-vfs-cache',
     hostname: '',
     rootShareName: 'timemachine',
+    browseShareName: 'timemachine',
+    browseShareEnabled: true,
     smbPublicPort: '445',
     smbStreamsBackend: 'xattr',
     mountPollSeconds: '30',
@@ -295,6 +353,9 @@ export default function DashboardPage() {
   });
   const [diskForm, setDiskForm] = useState(DEFAULT_DISK_FORM);
   const [mountForm, setMountForm] = useState(DEFAULT_MOUNT_FORM);
+  const [userForm, setUserForm] = useState(DEFAULT_USER_FORM);
+  const [groupForm, setGroupForm] = useState(DEFAULT_GROUP_FORM);
+  const [providerForm, setProviderForm] = useState(DEFAULT_PROVIDER_FORM);
   const [editingDiskId, setEditingDiskId] = useState('');
   const [editingDiskForm, setEditingDiskForm] = useState(DEFAULT_DISK_FORM);
   const [editingMountId, setEditingMountId] = useState('');
@@ -328,7 +389,11 @@ export default function DashboardPage() {
   const [theme, setTheme] = useState('system');
 
   const mounts = dashboard?.mounts || [];
-  const disks = dashboard?.disks || [];
+  const shares = dashboard?.shares || dashboard?.disks || [];
+  const disks = shares;
+  const users = dashboard?.users || [];
+  const groups = dashboard?.groups || [];
+  const identityProviders = dashboard?.identityProviders || [];
   const settingsConfig = dashboard?.settingsConfig || {};
 
   const settingSourceLabel = (key) => {
@@ -346,6 +411,8 @@ export default function DashboardPage() {
     [mounts]
   );
   const mountById = useMemo(() => new Map(mounts.map((mount) => [mount.id, mount])), [mounts]);
+  const userOptions = useMemo(() => users.map((user) => ({ id: user.id, label: `${user.username}${user.displayName ? ` (${user.displayName})` : ''}` })), [users]);
+  const groupOptions = useMemo(() => groups.map((group) => ({ id: group.id, label: group.name })), [groups]);
   const filteredLogs = useMemo(
     () =>
       logs.filter((entry) => {
@@ -376,6 +443,8 @@ export default function DashboardPage() {
       adminSessionSeconds: String(next?.settings?.adminSessionSeconds || 43200),
       hostname: next?.settings?.hostname || '',
       rootShareName: next?.settings?.rootShareName || 'timemachine',
+      browseShareName: next?.settings?.browseShareName || next?.settings?.rootShareName || 'timemachine',
+      browseShareEnabled: next?.settings?.browseShareEnabled !== false,
       smbPublicPort: String(next?.settings?.smbPublicPort || 445),
       smbEnabled: next?.settings?.smbEnabled !== false,
       sftpEnabled: next?.settings?.sftpEnabled !== false,
@@ -424,6 +493,8 @@ export default function DashboardPage() {
       vpsCacheDir: next?.settings?.vpsCacheDir || '/data/vps/rclone-vfs-cache',
       hostname: next?.settings?.hostname || '',
       rootShareName: next?.settings?.rootShareName || 'timemachine',
+      browseShareName: next?.settings?.browseShareName || next?.settings?.rootShareName || 'timemachine',
+      browseShareEnabled: next?.settings?.browseShareEnabled !== false,
       smbPublicPort: String(next?.settings?.smbPublicPort || 445),
       smbStreamsBackend: next?.settings?.smbStreamsBackend || 'xattr',
       mountPollSeconds: String(next?.settings?.mountPollSeconds || 30),
@@ -1041,7 +1112,9 @@ export default function DashboardPage() {
           adminSessionSeconds: Number(setupForm.adminSessionSeconds || 43200),
           vpsCacheDir: setupForm.vpsCacheDir,
           hostname: setupForm.hostname,
-          rootShareName: setupForm.rootShareName,
+          browseShareName: setupForm.browseShareName,
+          browseShareEnabled: setupForm.browseShareEnabled,
+          rootShareName: setupForm.browseShareName,
           smbPublicPort: Number(setupForm.smbPublicPort || 445),
           smbStreamsBackend: setupForm.smbStreamsBackend,
           mountPollSeconds: Number(setupForm.mountPollSeconds || 30),
@@ -1107,7 +1180,9 @@ export default function DashboardPage() {
           apiToken: settingsForm.apiToken.trim() || undefined,
           adminSessionSeconds: Number(settingsForm.adminSessionSeconds || 43200),
           hostname: settingsForm.hostname,
-          rootShareName: settingsForm.rootShareName,
+          browseShareName: settingsForm.browseShareName,
+          browseShareEnabled: settingsForm.browseShareEnabled,
+          rootShareName: settingsForm.browseShareName,
           smbPublicPort: Number(settingsForm.smbPublicPort || 445),
           smbEnabled: settingsForm.smbEnabled,
           sftpEnabled: settingsForm.sftpEnabled,
@@ -1185,22 +1260,24 @@ export default function DashboardPage() {
 
   const smbConfigTextForDisk = (disk) =>
     [
-      `Drive: ${disk.name}`,
-      `Share Name: ${disk.smbShareName || ''}`,
-      `Share URL: ${disk.diskShareUrl || ''}`,
-      `Root URL: ${disk.rootShareUrl || ''}`,
-      `Username: ${disk.smbUsername || ''}`,
-      `Password: ${disk.smbPassword || ''}`,
+      `Share: ${disk.name}`,
+      `Share Name: ${disk.smbShareName || disk?.smb?.shareName || ''}`,
+      `Share URL: ${disk.diskShareUrl || disk?.smb?.url || ''}`,
+      `Browse URL: ${disk.rootShareUrl || disk?.smb?.rootUrl || ''}`,
+      `Mode: ${(disk?.smb?.authMode || disk.accessMode || 'legacy-per-share')}`,
+      `Username: ${disk.smbUsername || disk?.smb?.legacyUsername || ''}`,
+      `Password: ${disk.smbPassword || disk?.smb?.legacyPassword || ''}`,
       `Storage Path: ${disk.storagePath || ''}`
     ].join('\n');
 
   const sftpConfigTextForDisk = (disk) =>
     [
-      `Drive: ${disk.name}`,
-      `URL: ${disk.sftpUrl || ''}`,
-      `Path: ${disk.sftpPath || ''}`,
-      `Username: ${disk.sftpUsername || ''}`,
-      `Password: ${disk.sftpPassword || ''}`,
+      `Share: ${disk.name}`,
+      `URL: ${disk.sftpUrl || disk?.sftp?.url || ''}`,
+      `Path: ${disk.sftpPath || disk?.sftp?.path || ''}`,
+      `Mode: ${disk?.sftp?.authMode || disk.accessMode || 'legacy-per-share'}`,
+      `Username: ${disk.sftpUsername || disk?.sftp?.legacyUsername || ''}`,
+      `Password: ${disk.sftpPassword || disk?.sftp?.legacyPassword || ''}`,
       `Storage Path: ${disk.storagePath || ''}`
     ].join('\n');
 
@@ -1209,16 +1286,22 @@ export default function DashboardPage() {
     setEditingDiskId(disk.id);
     setEditingDiskForm({
       name: disk.name || '',
-      quotaGb: String(disk.quotaGb || 0),
+      timeMachineEnabled: disk.timeMachineEnabled === true || disk?.smb?.timeMachineEnabled === true,
+      timeMachineQuotaGb: String(disk.timeMachineQuotaGb ?? disk.quotaGb ?? 0),
+      accessMode: disk.accessMode || disk?.access?.mode || 'legacy-per-share',
+      smbUserIds: formatIdList(disk?.access?.policy?.smb?.userIds || []),
+      smbGroupIds: formatIdList(disk?.access?.policy?.smb?.groupIds || []),
+      sftpUserIds: formatIdList(disk?.access?.policy?.sftp?.userIds || []),
+      sftpGroupIds: formatIdList(disk?.access?.policy?.sftp?.groupIds || []),
       storageMode: disk.storageMode || 'local',
       storageMountId: disk.storageMountId || '',
       storageSubdir: subdirFromPaths(mount?.mountPath || disk.storageBasePath, disk.storagePath),
       storagePath: disk.storageBasePath || disk.storagePath || '',
-      shareName: disk.smbShareName || '',
-      smbUsername: disk.smbUsername || '',
-      smbPassword: disk.smbPassword || '',
-      sftpUsername: disk.sftpUsername || '',
-      sftpPassword: disk.sftpPassword || '',
+      shareName: disk.smbShareName || disk?.smb?.shareName || '',
+      smbUsername: disk.smbUsername || disk?.smb?.legacyUsername || '',
+      smbPassword: disk.smbPassword || disk?.smb?.legacyPassword || '',
+      sftpUsername: disk.sftpUsername || disk?.sftp?.legacyUsername || '',
+      sftpPassword: disk.sftpPassword || disk?.sftp?.legacyPassword || '',
       applySamba: true,
       applySftp: true
     });
@@ -1237,17 +1320,29 @@ export default function DashboardPage() {
 
     const currentDisk = disks.find((disk) => disk.id === editingDiskId);
     if (!currentDisk) {
-      setError('Drive no longer exists');
+      setError('Share no longer exists');
       return;
     }
 
-    await runAction('Drive updated successfully.', async () => {
+    await runAction('Share updated successfully.', async () => {
       const payload = {
         name: editingDiskForm.name.trim(),
-        quotaGb: Number(editingDiskForm.quotaGb || 0),
+        timeMachineEnabled: editingDiskForm.timeMachineEnabled,
+        timeMachineQuotaGb: Number(editingDiskForm.timeMachineQuotaGb || 0),
+        accessMode: editingDiskForm.accessMode,
+        accessPolicy: {
+          smb: {
+            userIds: parseIdList(editingDiskForm.smbUserIds),
+            groupIds: parseIdList(editingDiskForm.smbGroupIds)
+          },
+          sftp: {
+            userIds: parseIdList(editingDiskForm.sftpUserIds),
+            groupIds: parseIdList(editingDiskForm.sftpGroupIds)
+          }
+        },
         smbShareName: editingDiskForm.shareName.trim() || undefined,
-        smbUsername: editingDiskForm.smbUsername.trim() || undefined,
-        sftpUsername: editingDiskForm.sftpUsername.trim() || undefined,
+        smbUsername: editingDiskForm.accessMode === 'legacy-per-share' ? editingDiskForm.smbUsername.trim() || undefined : undefined,
+        sftpUsername: editingDiskForm.accessMode === 'legacy-per-share' ? editingDiskForm.sftpUsername.trim() || undefined : undefined,
         applySamba: settingsForm.smbEnabled && editingDiskForm.applySamba,
         applySftp: settingsForm.sftpEnabled && editingDiskForm.applySftp
       };
@@ -1265,26 +1360,26 @@ export default function DashboardPage() {
         payload.storagePath = editingDiskForm.storagePath.trim() || undefined;
       }
 
-      await api(`/admin/api/disks/${editingDiskId}`, {
+      await api(`/admin/api/shares/${editingDiskId}`, {
         method: 'PUT',
         body: JSON.stringify(payload)
       });
 
-      if (editingDiskForm.smbPassword !== currentDisk.smbPassword) {
+      if (editingDiskForm.accessMode === 'legacy-per-share' && editingDiskForm.smbPassword !== currentDisk.smbPassword) {
         if (!editingDiskForm.smbPassword) {
           throw new Error('SMB password cannot be empty');
         }
-        await api(`/admin/api/disks/${editingDiskId}/password`, {
+        await api(`/admin/api/shares/${editingDiskId}/password`, {
           method: 'POST',
           body: JSON.stringify({ password: editingDiskForm.smbPassword })
         });
       }
 
-      if (editingDiskForm.sftpPassword !== currentDisk.sftpPassword) {
+      if (editingDiskForm.accessMode === 'legacy-per-share' && editingDiskForm.sftpPassword !== currentDisk.sftpPassword) {
         if (!editingDiskForm.sftpPassword) {
           throw new Error('SFTP password cannot be empty');
         }
-        await api(`/admin/api/disks/${editingDiskId}/sftp-password`, {
+        await api(`/admin/api/shares/${editingDiskId}/sftp-password`, {
           method: 'POST',
           body: JSON.stringify({ password: editingDiskForm.sftpPassword })
         });
@@ -1363,16 +1458,28 @@ export default function DashboardPage() {
   const handleCreateDisk = async (event) => {
     event.preventDefault();
 
-    await runAction('Drive created successfully!', async () => {
+    await runAction('Share created successfully!', async () => {
       const payload = {
         name: diskForm.name.trim(),
-        quotaGb: Number(diskForm.quotaGb || 0),
+        timeMachineEnabled: diskForm.timeMachineEnabled,
+        timeMachineQuotaGb: Number(diskForm.timeMachineQuotaGb || 0),
+        accessMode: diskForm.accessMode,
+        accessPolicy: {
+          smb: {
+            userIds: parseIdList(diskForm.smbUserIds),
+            groupIds: parseIdList(diskForm.smbGroupIds)
+          },
+          sftp: {
+            userIds: parseIdList(diskForm.sftpUserIds),
+            groupIds: parseIdList(diskForm.sftpGroupIds)
+          }
+        },
         storageMode: diskForm.storageMode,
         shareName: diskForm.shareName.trim() || undefined,
-        smbUsername: diskForm.smbUsername.trim() || undefined,
-        smbPassword: diskForm.smbPassword || undefined,
-        sftpUsername: diskForm.sftpUsername.trim() || undefined,
-        sftpPassword: diskForm.sftpPassword || undefined,
+        smbUsername: diskForm.accessMode === 'legacy-per-share' ? diskForm.smbUsername.trim() || undefined : undefined,
+        smbPassword: diskForm.accessMode === 'legacy-per-share' ? diskForm.smbPassword || undefined : undefined,
+        sftpUsername: diskForm.accessMode === 'legacy-per-share' ? diskForm.sftpUsername.trim() || undefined : undefined,
+        sftpPassword: diskForm.accessMode === 'legacy-per-share' ? diskForm.sftpPassword || undefined : undefined,
         applySamba: settingsForm.smbEnabled && diskForm.applySamba,
         applySftp: settingsForm.sftpEnabled && diskForm.applySftp
       };
@@ -1386,7 +1493,7 @@ export default function DashboardPage() {
         payload.storagePath = diskForm.storagePath.trim() || undefined;
       }
 
-      await api('/admin/api/disks', {
+      await api('/admin/api/shares', {
         method: 'POST',
         body: JSON.stringify(payload)
       });
@@ -1400,15 +1507,15 @@ export default function DashboardPage() {
   const handleDiskAction = async (diskId, action) => {
     await runAction('', async () => {
       if (action === 'rotate') {
-        await api(`/admin/api/disks/${diskId}/password`, {
+        await api(`/admin/api/shares/${diskId}/password`, {
           method: 'POST',
           body: '{}'
         });
-        setNotice(`Password rotated for ${diskId}`);
+        setNotice(`SMB password rotated for ${diskId}`);
       }
 
       if (action === 'rotate-sftp') {
-        await api(`/admin/api/disks/${diskId}/sftp-password`, {
+        await api(`/admin/api/shares/${diskId}/sftp-password`, {
           method: 'POST',
           body: '{}'
         });
@@ -1416,7 +1523,7 @@ export default function DashboardPage() {
       }
 
       if (action === 'apply') {
-        await api(`/admin/api/disks/${diskId}/apply-samba`, {
+        await api(`/admin/api/shares/${diskId}/apply-samba`, {
           method: 'POST',
           body: '{}'
         });
@@ -1424,7 +1531,7 @@ export default function DashboardPage() {
       }
 
       if (action === 'apply-sftp') {
-        await api(`/admin/api/disks/${diskId}/apply-sftp`, {
+        await api(`/admin/api/shares/${diskId}/apply-sftp`, {
           method: 'POST',
           body: '{}'
         });
@@ -1432,18 +1539,115 @@ export default function DashboardPage() {
       }
 
       if (action === 'delete') {
-        const confirmed = window.confirm(`Are you sure you want to delete "${diskId}"? This action cannot be undone.`);
+        const confirmed = window.confirm(`Are you sure you want to delete share "${diskId}"? This action cannot be undone.`);
         if (!confirmed) {
           return;
         }
 
-        await api(`/admin/api/disks/${diskId}`, {
+        await api(`/admin/api/shares/${diskId}`, {
           method: 'DELETE',
           body: JSON.stringify({ deleteData: false })
         });
-        setNotice(`Drive "${diskId}" deleted successfully`);
+        setNotice(`Share "${diskId}" deleted successfully`);
       }
 
+      await refreshState();
+    });
+  };
+
+  const handleCreateUser = async (event) => {
+    event.preventDefault();
+    await runAction('Central user created.', async () => {
+      await api('/admin/api/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          username: userForm.username.trim(),
+          displayName: userForm.displayName.trim() || undefined,
+          authType: userForm.authType,
+          password: userForm.authType === 'local' ? userForm.password : undefined,
+          protocolUsername: userForm.protocolUsername.trim() || undefined,
+          protocolPassword: userForm.protocolPassword || undefined,
+          groupIds: parseIdList(userForm.groupIds),
+          enabled: userForm.enabled,
+          isAdmin: userForm.isAdmin,
+          smbEnabled: userForm.smbEnabled,
+          sftpEnabled: userForm.sftpEnabled,
+          identityProviderId: userForm.identityProviderId || undefined,
+          externalSubject: userForm.externalSubject.trim() || undefined
+        })
+      });
+      setUserForm(DEFAULT_USER_FORM);
+      await refreshState();
+    });
+  };
+
+  const handleDeleteUser = async (userId) => {
+    await runAction('', async () => {
+      await api(`/admin/api/users/${userId}`, { method: 'DELETE' });
+      setNotice(`User "${userId}" deleted.`);
+      await refreshState();
+    });
+  };
+
+  const handleCreateGroup = async (event) => {
+    event.preventDefault();
+    await runAction('Group created.', async () => {
+      await api('/admin/api/groups', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: groupForm.name.trim(),
+          description: groupForm.description.trim() || undefined,
+          memberUserIds: parseIdList(groupForm.memberUserIds)
+        })
+      });
+      setGroupForm(DEFAULT_GROUP_FORM);
+      await refreshState();
+    });
+  };
+
+  const handleDeleteGroup = async (groupId) => {
+    await runAction('', async () => {
+      await api(`/admin/api/groups/${groupId}`, { method: 'DELETE' });
+      setNotice(`Group "${groupId}" deleted.`);
+      await refreshState();
+    });
+  };
+
+  const handleCreateProvider = async (event) => {
+    event.preventDefault();
+    await runAction('Identity provider created.', async () => {
+      const config = providerForm.type === 'oidc'
+        ? {
+          issuer: providerForm.issuer.trim(),
+          clientId: providerForm.clientId.trim(),
+          clientSecret: providerForm.clientSecret,
+          scopes: providerForm.scopes.trim()
+        }
+        : {
+          directoryUrl: providerForm.directoryUrl.trim(),
+          directoryDomain: providerForm.directoryDomain.trim(),
+          directoryRealm: providerForm.directoryRealm.trim(),
+          directoryBindDn: providerForm.directoryBindDn.trim(),
+          directoryBindPassword: providerForm.directoryBindPassword
+        };
+      await api('/admin/api/identity-providers', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: providerForm.name.trim(),
+          type: providerForm.type,
+          enabled: providerForm.enabled,
+          config
+        })
+      });
+      setProviderForm(DEFAULT_PROVIDER_FORM);
+      await refreshState();
+    });
+  };
+
+  const handleDeleteProvider = async (providerId) => {
+    await runAction('', async () => {
+      await api(`/admin/api/identity-providers/${providerId}`, { method: 'DELETE' });
+      setNotice(`Identity provider "${providerId}" deleted.`);
       await refreshState();
     });
   };
@@ -1595,7 +1799,7 @@ export default function DashboardPage() {
   }
 
   const navItems = [
-    { id: 'drives', icon: 'drives', label: 'Drives', count: disks.length },
+    { id: 'drives', icon: 'drives', label: 'Shares', count: shares.length },
     { id: 'mounts', icon: 'cloud', label: 'Cloud Mounts', count: mounts.length },
     { id: 'logs', icon: 'logs', label: 'Live Logs', count: logs.length },
     { id: 'settings', icon: 'settings', label: 'Settings' }
@@ -1608,7 +1812,7 @@ export default function DashboardPage() {
         <button className="btn ghost icon-only" onClick={() => setSidebarOpen(!sidebarOpen)}>
           ☰
         </button>
-        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>TM Adapter</h1>
+        <h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>TM Adapter Shares</h1>
       </div>
 
       {/* Sidebar */}
@@ -1749,15 +1953,25 @@ export default function DashboardPage() {
                 </div>
 
                 <div className="form-group">
-                  <label htmlFor="setup-share">Root Share Name</label>
+                  <label htmlFor="setup-share">Browse Share Name</label>
                   <input
                     id="setup-share"
                     type="text"
-                    value={setupForm.rootShareName}
-                    onChange={(e) => setSetupForm((prev) => ({ ...prev, rootShareName: e.target.value }))}
+                    value={setupForm.browseShareName}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, browseShareName: e.target.value, rootShareName: e.target.value }))}
                     required
                   />
                 </div>
+
+                <label className="checkbox-group" htmlFor="setup-browse-enabled">
+                  <input
+                    id="setup-browse-enabled"
+                    type="checkbox"
+                    checked={setupForm.browseShareEnabled}
+                    onChange={(e) => setSetupForm((prev) => ({ ...prev, browseShareEnabled: e.target.checked }))}
+                  />
+                  <span>Enable the browse share as a top-level SMB entry point</span>
+                </label>
 
                 <div className="form-group">
                   <label htmlFor="setup-port">SMB Port</label>
@@ -1827,8 +2041,10 @@ export default function DashboardPage() {
                         onChange={(e) => setSetupForm((prev) => ({ ...prev, adminAuthMode: e.target.value }))}
                         disabled={isSettingLocked('adminAuthMode')}
                       >
-                        <option value="local">Local username/password</option>
+                        <option value="local">Break-glass local admin</option>
+                        <option value="centralized">Centralized local users</option>
                         <option value="oidc">OIDC SSO</option>
+                        <option value="ldap">LDAP / Active Directory</option>
                       </select>
                     </div>
 
@@ -1840,8 +2056,8 @@ export default function DashboardPage() {
                         onChange={(e) => setSetupForm((prev) => ({ ...prev, smbAuthMode: e.target.value }))}
                         disabled={isSettingLocked('smbAuthMode')}
                       >
-                        <option value="local">Local credentials</option>
-                        <option value="enterprise">Enterprise auth</option>
+                        <option value="legacy-per-share">Legacy per-share credentials</option>
+                        <option value="centralized">Centralized user access</option>
                       </select>
                     </div>
 
@@ -1853,8 +2069,8 @@ export default function DashboardPage() {
                         onChange={(e) => setSetupForm((prev) => ({ ...prev, sftpAuthMode: e.target.value }))}
                         disabled={isSettingLocked('sftpAuthMode')}
                       >
-                        <option value="local">Local credentials</option>
-                        <option value="enterprise">Enterprise auth</option>
+                        <option value="legacy-per-share">Legacy per-share credentials</option>
+                        <option value="centralized">Centralized user access</option>
                       </select>
                     </div>
 
@@ -2144,50 +2360,63 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Drives Tab */}
+        {/* Shares Tab */}
         {activeTab === 'drives' && (
           <div className="animate-in">
             <div className="page-header">
-              <h2>Time Machine Drives</h2>
-              <p>Manage virtual drives for Time Machine backups</p>
+              <h2>Shares</h2>
+              <p>Manage SMB Mac Shares, Time Machine destinations, and secondary protocol access.</p>
             </div>
 
             <div className="section-header">
-              <h3>{disks.length} Drive{disks.length !== 1 ? 's' : ''} Configured</h3>
+              <h3>{shares.length} Share{shares.length !== 1 ? 's' : ''} Configured</h3>
               <button className="btn primary" onClick={() => setShowAddDrive(!showAddDrive)}>
-                <Icon name="add" /> Add Drive
+                <Icon name="add" /> Add Share
               </button>
             </div>
 
             {showAddDrive && (
               <div className="card animate-in" style={{ marginBottom: 20 }}>
                 <div className="card-header">
-                  <h3><Icon name="add" /> Create New Drive</h3>
+                  <h3><Icon name="add" /> Create New Share</h3>
                 </div>
 
                 <form onSubmit={handleCreateDisk}>
                   <div className="form-grid">
                     <div className="form-group">
-                      <label htmlFor="disk-name">Drive Name</label>
+                      <label htmlFor="disk-name">Share Name</label>
                       <input
                         id="disk-name"
                         type="text"
                         value={diskForm.name}
                         onChange={(e) => setDiskForm((prev) => ({ ...prev, name: e.target.value }))}
-                        placeholder="My Time Machine"
+                        placeholder="Design Share"
                         required
                       />
                     </div>
 
                     <div className="form-group">
-                      <label htmlFor="disk-quota">Quota (GB)</label>
+                      <label htmlFor="disk-tm-enabled">Time Machine Destination</label>
+                      <select
+                        id="disk-tm-enabled"
+                        value={diskForm.timeMachineEnabled ? 'enabled' : 'disabled'}
+                        onChange={(e) => setDiskForm((prev) => ({ ...prev, timeMachineEnabled: e.target.value === 'enabled' }))}
+                      >
+                        <option value="disabled">Disabled</option>
+                        <option value="enabled">Enabled</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group">
+                      <label htmlFor="disk-quota">Time Machine Quota (GB)</label>
                       <input
                         id="disk-quota"
                         type="number"
                         min="0"
-                        value={diskForm.quotaGb}
-                        onChange={(e) => setDiskForm((prev) => ({ ...prev, quotaGb: e.target.value }))}
+                        value={diskForm.timeMachineQuotaGb}
+                        onChange={(e) => setDiskForm((prev) => ({ ...prev, timeMachineQuotaGb: e.target.value }))}
                         placeholder="0 for unlimited"
+                        disabled={!diskForm.timeMachineEnabled}
                       />
                     </div>
 
@@ -2260,6 +2489,65 @@ export default function DashboardPage() {
                     </div>
 
                     <div className="form-group">
+                      <label htmlFor="disk-access-mode">Access Mode</label>
+                      <select
+                        id="disk-access-mode"
+                        value={diskForm.accessMode}
+                        onChange={(e) => setDiskForm((prev) => ({ ...prev, accessMode: e.target.value }))}
+                      >
+                        <option value="legacy-per-share">Legacy per-share credentials</option>
+                        <option value="centralized">Centralized users and groups</option>
+                      </select>
+                    </div>
+
+                    {diskForm.accessMode === 'centralized' && (
+                      <>
+                        <div className="form-group">
+                          <label htmlFor="disk-smb-user-ids">SMB User IDs</label>
+                          <input
+                            id="disk-smb-user-ids"
+                            type="text"
+                            value={diskForm.smbUserIds}
+                            onChange={(e) => setDiskForm((prev) => ({ ...prev, smbUserIds: e.target.value }))}
+                            placeholder={userOptions.map((user) => user.id).join(', ') || 'user-id-1, user-id-2'}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="disk-smb-group-ids">SMB Group IDs</label>
+                          <input
+                            id="disk-smb-group-ids"
+                            type="text"
+                            value={diskForm.smbGroupIds}
+                            onChange={(e) => setDiskForm((prev) => ({ ...prev, smbGroupIds: e.target.value }))}
+                            placeholder={groupOptions.map((group) => group.id).join(', ') || 'group-id-1, group-id-2'}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="disk-sftp-user-ids">SFTP User IDs</label>
+                          <input
+                            id="disk-sftp-user-ids"
+                            type="text"
+                            value={diskForm.sftpUserIds}
+                            onChange={(e) => setDiskForm((prev) => ({ ...prev, sftpUserIds: e.target.value }))}
+                            placeholder={userOptions.map((user) => user.id).join(', ') || 'user-id-1, user-id-2'}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label htmlFor="disk-sftp-group-ids">SFTP Group IDs</label>
+                          <input
+                            id="disk-sftp-group-ids"
+                            type="text"
+                            value={diskForm.sftpGroupIds}
+                            onChange={(e) => setDiskForm((prev) => ({ ...prev, sftpGroupIds: e.target.value }))}
+                            placeholder={groupOptions.map((group) => group.id).join(', ') || 'group-id-1, group-id-2'}
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {diskForm.accessMode === 'legacy-per-share' && (
+                      <>
+                    <div className="form-group">
                       <label htmlFor="disk-user">SMB Username</label>
                       <input
                         id="disk-user"
@@ -2302,6 +2590,8 @@ export default function DashboardPage() {
                         placeholder="Auto-generated if empty"
                       />
                     </div>
+                      </>
+                    )}
                   </div>
 
                   <div className="checkbox-group">
@@ -2312,7 +2602,7 @@ export default function DashboardPage() {
                       onChange={(e) => setDiskForm((prev) => ({ ...prev, applySamba: e.target.checked }))}
                     />
                     <span onClick={() => setDiskForm((prev) => ({ ...prev, applySamba: !prev.applySamba }))}>
-                      Apply Samba configuration immediately
+                      Apply SMB share configuration immediately
                     </span>
                   </div>
 
@@ -2324,13 +2614,13 @@ export default function DashboardPage() {
                       onChange={(e) => setDiskForm((prev) => ({ ...prev, applySftp: e.target.checked }))}
                     />
                     <span onClick={() => setDiskForm((prev) => ({ ...prev, applySftp: !prev.applySftp }))}>
-                      Apply SFTP configuration immediately
+                      Apply SFTP access configuration immediately
                     </span>
                   </div>
 
                   <div className="form-actions">
                     <button className="btn primary" type="submit" disabled={submitting}>
-                      <Icon name="add" /> Create Drive
+                      <Icon name="add" /> Create Share
                     </button>
                     <button className="btn ghost" type="button" onClick={() => setShowAddDrive(false)}>
                       Cancel
@@ -2340,17 +2630,17 @@ export default function DashboardPage() {
               </div>
             )}
 
-            {disks.length === 0 ? (
+            {shares.length === 0 ? (
               <div className="card">
                 <div className="empty-state">
                   <div className="icon">💾</div>
-                  <h4>No drives configured</h4>
-                  <p>Create your first Time Machine drive to get started with backups.</p>
+                  <h4>No shares configured</h4>
+                  <p>Create your first SMB Mac Share, then enable Time Machine only where you need it.</p>
                 </div>
               </div>
             ) : (
               <div className="stack">
-                {disks.map((disk) => {
+                {shares.map((disk) => {
                   const isEditing = editingDiskId === disk.id;
                   return (
                     <div key={disk.id} className="card">
@@ -2365,7 +2655,7 @@ export default function DashboardPage() {
                         <form onSubmit={handleUpdateDisk}>
                           <div className="form-grid">
                             <div className="form-group">
-                              <label htmlFor={`edit-disk-name-${disk.id}`}>Drive Name</label>
+                              <label htmlFor={`edit-disk-name-${disk.id}`}>Share Name</label>
                               <input
                                 id={`edit-disk-name-${disk.id}`}
                                 type="text"
@@ -2376,13 +2666,26 @@ export default function DashboardPage() {
                             </div>
 
                             <div className="form-group">
-                              <label htmlFor={`edit-disk-quota-${disk.id}`}>Quota (GB)</label>
+                              <label htmlFor={`edit-disk-tm-enabled-${disk.id}`}>Time Machine Destination</label>
+                              <select
+                                id={`edit-disk-tm-enabled-${disk.id}`}
+                                value={editingDiskForm.timeMachineEnabled ? 'enabled' : 'disabled'}
+                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, timeMachineEnabled: e.target.value === 'enabled' }))}
+                              >
+                                <option value="disabled">Disabled</option>
+                                <option value="enabled">Enabled</option>
+                              </select>
+                            </div>
+
+                            <div className="form-group">
+                              <label htmlFor={`edit-disk-quota-${disk.id}`}>Time Machine Quota (GB)</label>
                               <input
                                 id={`edit-disk-quota-${disk.id}`}
                                 type="number"
                                 min="0"
-                                value={editingDiskForm.quotaGb}
-                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, quotaGb: e.target.value }))}
+                                value={editingDiskForm.timeMachineQuotaGb}
+                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, timeMachineQuotaGb: e.target.value }))}
+                                disabled={!editingDiskForm.timeMachineEnabled}
                               />
                             </div>
 
@@ -2453,6 +2756,61 @@ export default function DashboardPage() {
                             </div>
 
                             <div className="form-group">
+                              <label htmlFor={`edit-disk-access-mode-${disk.id}`}>Access Mode</label>
+                              <select
+                                id={`edit-disk-access-mode-${disk.id}`}
+                                value={editingDiskForm.accessMode}
+                                onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, accessMode: e.target.value }))}
+                              >
+                                <option value="legacy-per-share">Legacy per-share credentials</option>
+                                <option value="centralized">Centralized users and groups</option>
+                              </select>
+                            </div>
+
+                            {editingDiskForm.accessMode === 'centralized' && (
+                              <>
+                                <div className="form-group">
+                                  <label htmlFor={`edit-disk-smb-user-ids-${disk.id}`}>SMB User IDs</label>
+                                  <input
+                                    id={`edit-disk-smb-user-ids-${disk.id}`}
+                                    type="text"
+                                    value={editingDiskForm.smbUserIds}
+                                    onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, smbUserIds: e.target.value }))}
+                                  />
+                                </div>
+                                <div className="form-group">
+                                  <label htmlFor={`edit-disk-smb-group-ids-${disk.id}`}>SMB Group IDs</label>
+                                  <input
+                                    id={`edit-disk-smb-group-ids-${disk.id}`}
+                                    type="text"
+                                    value={editingDiskForm.smbGroupIds}
+                                    onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, smbGroupIds: e.target.value }))}
+                                  />
+                                </div>
+                                <div className="form-group">
+                                  <label htmlFor={`edit-disk-sftp-user-ids-${disk.id}`}>SFTP User IDs</label>
+                                  <input
+                                    id={`edit-disk-sftp-user-ids-${disk.id}`}
+                                    type="text"
+                                    value={editingDiskForm.sftpUserIds}
+                                    onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, sftpUserIds: e.target.value }))}
+                                  />
+                                </div>
+                                <div className="form-group">
+                                  <label htmlFor={`edit-disk-sftp-group-ids-${disk.id}`}>SFTP Group IDs</label>
+                                  <input
+                                    id={`edit-disk-sftp-group-ids-${disk.id}`}
+                                    type="text"
+                                    value={editingDiskForm.sftpGroupIds}
+                                    onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, sftpGroupIds: e.target.value }))}
+                                  />
+                                </div>
+                              </>
+                            )}
+
+                            {editingDiskForm.accessMode === 'legacy-per-share' && (
+                              <>
+                            <div className="form-group">
                               <label htmlFor={`edit-disk-user-${disk.id}`}>SMB Username</label>
                               <input
                                 id={`edit-disk-user-${disk.id}`}
@@ -2495,6 +2853,8 @@ export default function DashboardPage() {
                                 required
                               />
                             </div>
+                              </>
+                            )}
                           </div>
 
                           <div className="checkbox-group">
@@ -2505,7 +2865,7 @@ export default function DashboardPage() {
                               onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, applySamba: e.target.checked }))}
                             />
                             <span onClick={() => setEditingDiskForm((prev) => ({ ...prev, applySamba: !prev.applySamba }))}>
-                              Apply Samba configuration immediately
+                              Apply SMB share configuration immediately
                             </span>
                           </div>
 
@@ -2517,13 +2877,13 @@ export default function DashboardPage() {
                               onChange={(e) => setEditingDiskForm((prev) => ({ ...prev, applySftp: e.target.checked }))}
                             />
                             <span onClick={() => setEditingDiskForm((prev) => ({ ...prev, applySftp: !prev.applySftp }))}>
-                              Apply SFTP configuration immediately
+                              Apply SFTP access configuration immediately
                             </span>
                           </div>
 
                           <div className="form-actions">
                             <button className="btn primary" type="submit" disabled={submitting}>
-                              <Icon name="check" /> Save Drive
+                              <Icon name="check" /> Save Share
                             </button>
                             <button className="btn ghost" type="button" onClick={cancelEditDisk}>
                               Cancel
@@ -2534,36 +2894,36 @@ export default function DashboardPage() {
                         <>
                           <div className="info-grid">
                             <div className="info-item">
-                              <div className="label">SMB URL</div>
-                              <div className="value">{disk.diskShareUrl || 'N/A'}</div>
+                              <div className="label">SMB Mac Share URL</div>
+                              <div className="value">{disk.diskShareUrl || disk?.smb?.url || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">SMB Root URL</div>
-                              <div className="value">{disk.rootShareUrl || 'N/A'}</div>
+                              <div className="label">Browse Share URL</div>
+                              <div className="value">{disk.rootShareUrl || disk?.smb?.rootUrl || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">SMB Username</div>
-                              <div className="value">{disk.smbUsername || 'N/A'}</div>
+                              <div className="label">Time Machine</div>
+                              <div className="value">{disk.timeMachineEnabled === true || disk?.smb?.timeMachineEnabled ? 'Enabled' : 'Disabled'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">SMB Password</div>
-                              <div className="value">{disk.smbPassword || 'N/A'}</div>
+                              <div className="label">Access Mode</div>
+                              <div className="value">{disk.accessMode || disk?.access?.mode || 'legacy-per-share'}</div>
                             </div>
                             <div className="info-item">
                               <div className="label">SFTP URL</div>
-                              <div className="value">{disk.sftpUrl || 'N/A'}</div>
+                              <div className="value">{disk.sftpUrl || disk?.sftp?.url || 'N/A'}</div>
                             </div>
                             <div className="info-item">
                               <div className="label">SFTP Path</div>
                               <div className="value">{disk.sftpPath || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">SFTP Username</div>
-                              <div className="value">{disk.sftpUsername || 'N/A'}</div>
+                              <div className="label">Assigned Users</div>
+                              <div className="value">{disk?.access?.users?.map((user) => user.username).join(', ') || 'N/A'}</div>
                             </div>
                             <div className="info-item">
-                              <div className="label">SFTP Password</div>
-                              <div className="value">{disk.sftpPassword || 'N/A'}</div>
+                              <div className="label">Assigned Groups</div>
+                              <div className="value">{disk?.access?.groups?.map((group) => group.name).join(', ') || 'N/A'}</div>
                             </div>
                             <div className="info-item">
                               <div className="label">Storage Path</div>
@@ -3442,12 +3802,12 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="form-group">
-                    <label htmlFor="settings-share">Root Share Name</label>
+                    <label htmlFor="settings-share">Browse Share Name</label>
                     <input
                       id="settings-share"
                       type="text"
-                      value={settingsForm.rootShareName}
-                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, rootShareName: e.target.value }))}
+                      value={settingsForm.browseShareName}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, browseShareName: e.target.value, rootShareName: e.target.value }))}
                       required
                     />
                   </div>
@@ -3566,6 +3926,16 @@ export default function DashboardPage() {
                     <span>Enable SMB management</span>
                   </label>
 
+                  <label className="checkbox-group" htmlFor="settings-browse-enabled">
+                    <input
+                      id="settings-browse-enabled"
+                      type="checkbox"
+                      checked={settingsForm.browseShareEnabled}
+                      onChange={(e) => setSettingsForm((prev) => ({ ...prev, browseShareEnabled: e.target.checked }))}
+                    />
+                    <span>Enable browse share</span>
+                  </label>
+
                   <label className="checkbox-group" htmlFor="settings-sftp-enabled">
                     <input
                       id="settings-sftp-enabled"
@@ -3654,8 +4024,10 @@ export default function DashboardPage() {
                         onChange={(e) => setSettingsForm((prev) => ({ ...prev, adminAuthMode: e.target.value }))}
                         disabled={isSettingLocked('adminAuthMode')}
                       >
-                        <option value="local">Local username/password</option>
+                        <option value="local">Break-glass local admin</option>
+                        <option value="centralized">Centralized local users</option>
                         <option value="oidc">OIDC SSO</option>
+                        <option value="ldap">LDAP / Active Directory</option>
                       </select>
                     </div>
 
@@ -3667,8 +4039,8 @@ export default function DashboardPage() {
                         onChange={(e) => setSettingsForm((prev) => ({ ...prev, smbAuthMode: e.target.value }))}
                         disabled={isSettingLocked('smbAuthMode')}
                       >
-                        <option value="local">Local credentials</option>
-                        <option value="enterprise">Enterprise auth</option>
+                        <option value="legacy-per-share">Legacy per-share credentials</option>
+                        <option value="centralized">Centralized user access</option>
                       </select>
                     </div>
 
@@ -3680,8 +4052,8 @@ export default function DashboardPage() {
                         onChange={(e) => setSettingsForm((prev) => ({ ...prev, sftpAuthMode: e.target.value }))}
                         disabled={isSettingLocked('sftpAuthMode')}
                       >
-                        <option value="local">Local credentials</option>
-                        <option value="enterprise">Enterprise auth</option>
+                        <option value="legacy-per-share">Legacy per-share credentials</option>
+                        <option value="centralized">Centralized user access</option>
                       </select>
                     </div>
 

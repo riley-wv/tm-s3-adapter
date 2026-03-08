@@ -1,260 +1,305 @@
 # Configuration Reference
 
-This document explains environment variables, runtime behavior, and storage/network models.
+This document describes the current runtime configuration for the open source project.
 
-## Environment variables
+## 1. Core model
 
-### Core ports
+The main user-facing object is a `share`.
 
-- `VPS_ADMIN_DASHBOARD_PORT` (default `8787`)
-  - Host bind for dashboard and session-auth admin APIs
-- `VPS_ADMIN_API_PORT` (default `8788`)
-  - Host bind for admin API + bearer-token public API
-- `VPS_SMB_PORT` (default `1445` in compose)
-  - Host bind mapped to container SMB port 445
-- `VPS_SMB_PUBLIC_PORT` (default follows `VPS_SMB_PORT` in compose)
-  - Port used in generated SMB URLs; set to client-visible port
-- `VPS_SFTP_PORT` (default `2222`)
-  - Direct SFTP port exposed by the container-hosted SFTP service
+A share combines:
 
-### Authentication and session
+- storage backing
+- SMB settings
+- optional Time Machine behavior
+- optional SFTP access
+- an access model
+
+Important related concepts:
+
+- `browse share`
+  - optional top-level SMB share
+- `legacy-per-share`
+  - a share owns its own SMB and SFTP credentials
+- `centralized`
+  - users and groups are assigned to shares
+
+Compatibility note:
+
+- the repository still persists `disks`
+- the API still exposes `disks` as a deprecated alias
+
+## 2. Environment variables
+
+### Service ports
+
+- `VPS_ADMIN_DASHBOARD_PORT`
+- `VPS_ADMIN_API_PORT`
+- `VPS_SMB_PORT`
+- `VPS_SMB_PUBLIC_PORT`
+- `VPS_SFTP_PORT`
+
+### Data and web paths
+
+- `VPS_DATA_DIR`
+- `VPS_SMB_SHARE_ROOT`
+- `VPS_ADMIN_WEB_ROOT`
+- `VPS_RUNTIME_LOG_DIR`
+- `VPS_RCLONE_CACHE_DIR`
+
+### Authentication and sessions
 
 - `VPS_API_TOKEN`
-  - Required bearer token for `/api/*`
-- `VPS_ADMIN_USERNAME` (default `admin`)
+- `VPS_ADMIN_USERNAME`
 - `VPS_ADMIN_PASSWORD`
-- `VPS_ADMIN_SESSION_SECONDS` (default `43200`)
+- `VPS_ADMIN_SESSION_SECONDS`
 
-Admin auth is cookie-based (`tm_admin_session`) with in-memory session storage.
+### Samba
 
-### Feature toggles
-
-- `VPS_SAMBA_MANAGE_ENABLED` (default `true` in compose)
-  - Enables Samba share user/config management
-- `VPS_SAMBA_STREAMS_BACKEND` (default `xattr`)
-  - SMB stream backend used in generated shares: `xattr` or `depot`
-  - Use `depot` if clients can connect but write operations fail with SMB I/O errors
-- `VPS_MOUNT_MANAGE_ENABLED` (default `true` in compose)
-  - Enables mount manager actions for cloud mounts
-- `VPS_MOUNT_POLL_SECONDS` (default `30`, minimum effective `10`)
-
-### Dual-source settings (UI + env)
-
-Enterprise/security/auth settings support dual-source resolution:
-
-1. `<NAME>_FORCE` (locked, highest priority)
-2. UI-saved value (dashboard setup/settings)
-3. `<NAME>_DEFAULT` (environment default)
-4. App default
-
-Examples:
-
-- `VPS_ENTERPRISE_FEATURES_ENABLED_DEFAULT` / `VPS_ENTERPRISE_FEATURES_ENABLED_FORCE`
-- `VPS_ADMIN_AUTH_MODE_DEFAULT` / `VPS_ADMIN_AUTH_MODE_FORCE`
-- `VPS_SMB_AUTH_MODE_DEFAULT` / `VPS_SMB_AUTH_MODE_FORCE`
-- `VPS_SFTP_AUTH_MODE_DEFAULT` / `VPS_SFTP_AUTH_MODE_FORCE`
-- `VPS_SECURITY_IP_ALLOWLIST_DEFAULT` / `VPS_SECURITY_IP_ALLOWLIST_FORCE`
-- `VPS_OIDC_ISSUER_DEFAULT` / `VPS_OIDC_ISSUER_FORCE`
-- `VPS_DIRECTORY_URL_DEFAULT` / `VPS_DIRECTORY_URL_FORCE`
-- `VPS_MOUNT_POLICY_MODE_DEFAULT` / `VPS_MOUNT_POLICY_MODE_FORCE`
-
-When a `*_FORCE` value is present, the dashboard shows that field as locked and read-only.
-
-### Postgres config store (required)
-
-Setup/settings configuration is stored in Postgres for all setups (local and enterprise).
-
-- `VPS_POSTGRES_ENABLED_DEFAULT` / `VPS_POSTGRES_ENABLED_FORCE`
-- `VPS_POSTGRES_HOST_DEFAULT` / `VPS_POSTGRES_HOST_FORCE`
-- `VPS_POSTGRES_PORT_DEFAULT` / `VPS_POSTGRES_PORT_FORCE`
-- `VPS_POSTGRES_DATABASE_DEFAULT` / `VPS_POSTGRES_DATABASE_FORCE`
-- `VPS_POSTGRES_USER_DEFAULT` / `VPS_POSTGRES_USER_FORCE`
-- `VPS_POSTGRES_PASSWORD_DEFAULT` / `VPS_POSTGRES_PASSWORD_FORCE`
-- `VPS_POSTGRES_SSL_MODE_DEFAULT` / `VPS_POSTGRES_SSL_MODE_FORCE`
-
-Postgres must be enabled and configured.
-
-### Migration and rollback examples
-
-Enable enterprise via UI:
-
-1. Dashboard -> Settings -> enable enterprise mode
-2. Configure Postgres settings
-3. Save settings
-
-Enable enterprise via env defaults:
-
-- Set `VPS_ENTERPRISE_FEATURES_ENABLED_DEFAULT=true`
-- Set `VPS_POSTGRES_ENABLED_DEFAULT=true` and Postgres connection defaults
-
-Rollback to local mode:
-
-1. Dashboard -> Settings -> set enterprise mode off
-2. Ensure admin/SMB/SFTP auth modes are `local`
-3. Save settings
-
-Force local fallback via env:
-
-- `VPS_ENTERPRISE_FEATURES_ENABLED_FORCE=false`
-- `VPS_ADMIN_AUTH_MODE_FORCE=local`
-- `VPS_SMB_AUTH_MODE_FORCE=local`
-- `VPS_SFTP_AUTH_MODE_FORCE=local`
-
-### SFTP account
-
-- `VPS_SFTP_USERNAME` (default `tmbackup`)
-- `VPS_SFTP_PASSWORD`
-- `VPS_SFTP_UID` (default `10000`)
-- `VPS_SFTP_GID` (default `10000`)
-- Optional `VPS_SFTP_ROOT_PATH` (default `/smb-share` for generated URL)
-
-### Paths and runtime internals
-
-- `VPS_DATA_DIR` (default `/data/vps`)
-- `VPS_SMB_SHARE_ROOT` (default `/data/vps/smb-share`)
-- `VPS_ADMIN_WEB_ROOT` (default `/app/web/vps-public`)
-- `VPS_RUNTIME_LOG_DIR` (default `${VPS_DATA_DIR}/runtime-logs`)
-
-Samba manager internals (advanced):
-
+- `VPS_SAMBA_MANAGE_ENABLED`
+- `VPS_SAMBA_STREAMS_BACKEND`
 - `VPS_SAMBA_CONF_DIR`
 - `VPS_SAMBA_MAIN_CONF`
 - `VPS_SAMBA_GENERATED_CONF`
 - `VPS_SAMBA_INCLUDE_LINE`
 - `VPS_SAMBA_RESTART_CMD`
 
-SFTP drive manager internals (advanced):
+`VPS_SAMBA_STREAMS_BACKEND`:
 
+- `xattr`
+  - best when the backing filesystem supports extended attributes
+- `depot`
+  - safer for many FUSE and cloud-mounted paths
+
+### Mount management
+
+- `VPS_MOUNT_MANAGE_ENABLED`
+- `VPS_MOUNT_POLL_SECONDS`
+- `VPSD_RCLONE_BINARY`
+
+### SFTP
+
+- `VPS_SFTP_USERNAME`
+- `VPS_SFTP_PASSWORD`
+- `VPS_SFTP_UID`
+- `VPS_SFTP_GID`
+- `VPS_SFTP_ROOT_PATH`
 - `VPS_SFTP_MANAGE_ENABLED`
 - `VPS_SFTP_GENERATED_CONF`
 - `VPS_SFTP_CHROOT_BASE_DIR`
 - `VPS_SFTP_DRIVE_DIR_NAME`
 - `VPS_SFTP_RESTART_CMD`
 
-Mount manager uses `VPSD_RCLONE_BINARY` as default rclone command.
+### Postgres-backed settings persistence
 
-Optional cache path override:
+- `VPS_POSTGRES_HOST`
+- `VPS_POSTGRES_PORT`
+- `VPS_POSTGRES_DATABASE`
+- `VPS_POSTGRES_USER`
+- `VPS_POSTGRES_PASSWORD`
+- `VPS_POSTGRES_SSL_MODE`
 
-- `VPS_RCLONE_CACHE_DIR` (default `/data/vps/rclone-vfs-cache`)
-  - Persistent on-disk cache used for cloud-mount read/write buffering
+## 3. Dual-source settings
 
-### Logs and terminal tuning
+Some settings can come from the dashboard or environment variables.
 
-- `VPS_LOG_BUFFER_SIZE` (default `2000` log events)
-- `VPS_TAIL_DEFAULT_LINES` (default `200`)
-- `VPS_TAIL_MAX_LINES` (default `5000`)
-- `VPS_TERMINAL_IDLE_MS` (default `1200000`)
-- `VPS_TERMINAL_BUFFER_CHARS` (default `300000`)
-- `VPS_TERMINAL_SNAPSHOT_CHARS` (default `120000`)
-- Optional `VPS_TERMINAL_SHELL`
+Precedence:
 
-## Data model and persistence
+1. `<NAME>_FORCE`
+2. dashboard-saved value
+3. `<NAME>_DEFAULT`
+4. application default
 
-Main metadata file:
+Examples:
+
+- `VPS_ADMIN_AUTH_MODE_DEFAULT`
+- `VPS_ADMIN_AUTH_MODE_FORCE`
+- `VPS_SMB_AUTH_MODE_DEFAULT`
+- `VPS_SMB_AUTH_MODE_FORCE`
+- `VPS_SFTP_AUTH_MODE_DEFAULT`
+- `VPS_SFTP_AUTH_MODE_FORCE`
+- `VPS_OIDC_ISSUER_DEFAULT`
+- `VPS_DIRECTORY_URL_DEFAULT`
+- `VPS_POSTGRES_HOST_DEFAULT`
+
+The environment variable names still use some historical naming such as `enterpriseFeaturesEnabled`. That is legacy naming in the config surface, not a separate private product tier.
+
+## 4. Persisted metadata
+
+The main metadata file is:
 
 - `${VPS_DATA_DIR}/metadata.json`
 
-Persisted volumes in compose:
+High-level stored objects:
 
-- `./data/vps:/data/vps`
-- `./data/mnt:/mnt/tm-cloud`
-- `./data/rclone:/root/.config/rclone`
+- `settings`
+- `cloudMounts`
+- `disks`
+- `users`
+- `groups`
+- `identityProviders`
+- `groupMappings`
 
-Runtime service logs:
+The application normalizes older metadata into the current share model on load.
 
-- `${VPS_RUNTIME_LOG_DIR}/admin-api.log`
-- `${VPS_RUNTIME_LOG_DIR}/samba.log`
-- `${VPS_RUNTIME_LOG_DIR}/sftp.log`
+## 5. Share settings
 
-## Disk storage modes
+Each share can include:
 
-- `local`
-  - Disk path under `VPS_SMB_SHARE_ROOT/<disk-id>`
-- `cloud-mount`
-  - Uses `storageMountId`; mount manager can auto-ensure mount before operations
-- `cloudmounter` / `filesystem`
-  - Legacy/custom explicit path mode (`storagePath` + optional `storageSubdir`)
+- `name`
+- `storageMode`
+- `storageMountId`
+- `storagePath`
+- `smbShareName`
+- `timeMachineEnabled`
+- `timeMachineQuotaGb`
+- `accessMode`
+- `accessPolicy`
 
-## Cloud mount providers
+`accessMode`:
+
+- `legacy-per-share`
+- `centralized`
+
+`accessPolicy` is split by protocol:
+
+- `smb.userIds`
+- `smb.groupIds`
+- `sftp.userIds`
+- `sftp.groupIds`
+
+## 6. Storage modes
+
+### `local`
+
+Storage path is created under:
+
+- `VPS_SMB_SHARE_ROOT/<share-id>`
+
+### `cloud-mount`
+
+The share points at a managed mount created through the dashboard or API.
+
+### `cloudmounter` / `filesystem`
+
+The share points at an explicit existing filesystem path.
+
+## 7. Supported cloud providers
+
+Managed mount providers:
 
 - `s3`
-  - Uses bucket, credentials, optional endpoint/region/prefix/provider
 - `google-drive`
-  - Uses rclone remote path (default fallback `gdrive:`)
 - `onedrive`
-  - Uses rclone remote path (default fallback `onedrive:`)
 - `rclone`
-  - Generic remote path
 
-Cloud mount settings support:
+Relevant provider fields:
 
-- `rcloneBinary`
-- `vfsCacheMode`
-- `dirCacheTime`
-- `pollInterval`
-- `extraArgs[]`
-- `enabled`
+- `remotePath`
+- `mountPath`
+- `bucket`
+- `prefix`
+- `region`
+- `endpoint`
+- `accessKeyId`
+- `secretAccessKey`
+- `s3Provider`
+- `extraArgs`
 
-## VPS read/write cache behavior (SMB + SFTP to cloud mounts)
+## 8. SMB behavior
 
-For disks using `cloud-mount`, SMB and SFTP I/O goes through rclone VFS cache on the VPS.
-These controls are configured in Dashboard -> Settings:
+All SMB shares use a macOS-friendly baseline:
 
-- `vpsCacheEnabled` (default `true`)
-- `vpsCacheDir` (default `/data/vps/rclone-vfs-cache`)
-- `vpsWriteBackSeconds` (default `120`)
-- `vpsCacheMaxSizeGb` (default `1`)
-- `vpsCacheMaxAgeHours` (default `24`)
-- `vpsReadAheadMb` (default `16`)
+- `vfs objects = catia fruit streams_<backend>`
+- fruit metadata/resource configuration
+- forced root ownership
+- Apple-compatible rename and metadata behavior
 
-When enabled, the mount manager applies:
+Time Machine is optional per share.
 
-- `--vfs-cache-mode full`
-- `--vfs-write-back <seconds>`
-- `--vfs-cache-max-size <GB>`
-- `--vfs-cache-max-age <hours>`
-- `--buffer-size <MB>`
-- `--cache-dir <vpsCacheDir>/<mount-id>`
-
-Because cache data is stored on the persistent VPS volume (`/data/vps` by default), queued writes survive service restarts and can be flushed after remount.
-
-## Networking and exposure model
-
-Compose keeps dashboard/API/Postgres on `127.0.0.1` and publishes SMB/SFTP on the host network interface.
-
-This means:
-
-- Dashboard/API/Postgres stay local-only unless you add a tunnel, reverse proxy, or VPN
-- SMB and SFTP can be reached directly once DNS and firewall rules allow them
-
-If external routing changes visible SMB port, set `VPS_SMB_PUBLIC_PORT` so generated SMB URLs remain correct.
-
-The app stores a single external `hostname` in settings and uses it for generated SMB and SFTP URLs. If you expose SMB and SFTP on different public hostnames, keep the stored `hostname` set to the SMB hostname and treat the SFTP hostname as a manual client endpoint.
-
-## SMB behavior for Time Machine
-
-Generated shares include:
+When enabled, the app also sets:
 
 - `fruit:time machine = yes`
-- `vfs objects = catia fruit streams_<backend>` (`VPS_SAMBA_STREAMS_BACKEND`, default `xattr`)
-- `streams_xattr` uses `fruit:resource = file`, `fruit:metadata = netatalk`, `fruit:locking = netatalk`
-- `streams_depot` uses `fruit:resource = stream`, `fruit:metadata = stream`
-- `force user = root`
-- `force group = root`
-- `durable handles = yes`
-- Optional quota as `fruit:time machine max size = <n>G`
+- `fruit:time machine max size = <n>G` when quota is set
+- additional durable-handle behavior needed for Time Machine
 
-The root share (`rootShareName`) is also generated when Samba management is enabled, but it is not marked as a Time Machine share.
+The browse share:
 
-When `streams_xattr` is selected, the adapter now probes the target share path for real xattr support before applying Samba. This works on local Linux filesystems with xattrs enabled, but typically fails on `rclone mount` / FUSE-backed cloud paths, which should use `streams_depot` instead.
+- uses the macOS-friendly baseline
+- is never marked as a Time Machine destination
 
-## Production hardening checklist
+## 9. SFTP behavior
 
-- Set strong secrets for admin/API/SFTP in `.env`
-- Keep enterprise mode disabled unless you need it
-- If using env locks (`*_FORCE`), document ownership and change process
-- Restrict host access; keep admin/API/Postgres loopback-only unless intentionally exposing them
-- Use a dedicated auth layer for web/admin exposure when you publish them beyond loopback
-- Limit public firewall exposure to the specific share ports you intend to expose
-- Rotate SMB disk passwords periodically
-- Back up metadata and rclone config regularly
+SFTP is the only shipped secondary protocol in the current open source release.
+
+Legacy mode:
+
+- each share gets its own SFTP user
+- each user is chrooted into the share path
+
+Centralized mode:
+
+- centralized protocol users can be assigned to multiple shares
+- the generated SFTP view exposes only the shares assigned to that user
+
+Deferred:
+
+- WebDAV
+- NFS
+
+## 10. Centralized identity
+
+Current modeled entities:
+
+- users
+- groups
+- identity providers
+- group mappings
+
+Current provider categories:
+
+- local
+- OIDC
+- LDAP / Active Directory
+
+Current implementation reality:
+
+- local centralized users are usable today
+- OIDC and LDAP/AD are represented in configuration and policy
+- their full runtime authentication flow is not fully complete yet
+
+## 11. Cache behavior
+
+For cloud-mounted shares, VPS-side cache settings apply to SMB and SFTP traffic.
+
+Main settings:
+
+- `vpsCacheEnabled`
+- `vpsCacheDir`
+- `vpsWriteBackSeconds`
+- `vpsCacheMaxSizeGb`
+- `vpsCacheMaxAgeHours`
+- `vpsReadAheadMb`
+
+## 12. Networking model
+
+The default compose model keeps:
+
+- dashboard on loopback
+- admin/public API on loopback
+- Postgres on loopback
+
+and publishes:
+
+- SMB
+- SFTP
+
+This is intentional and should remain the default documented posture for open source self-hosting.
+
+## 13. Recommended production defaults
+
+- keep admin/API/Postgres off the public internet
+- expose SMB and SFTP only if you need them
+- use strong secrets
+- prefer `depot` on cloud/FUSE-backed shares
+- validate Time Machine on a local share before assuming cloud-backed reliability
+- back up metadata and rclone config regularly

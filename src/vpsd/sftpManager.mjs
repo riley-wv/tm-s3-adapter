@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { runCommand } from '../shared/commands.mjs';
@@ -17,6 +17,18 @@ function shellQuote(value) {
 
 function driveMatchConfig(disk, chrootDirectory, driveDirectory) {
   return `Match User ${disk.sftpUsername}
+  ChrootDirectory ${chrootDirectory}
+  PasswordAuthentication yes
+  PubkeyAuthentication no
+  PermitTTY no
+  X11Forwarding no
+  AllowTcpForwarding no
+  ForceCommand internal-sftp -d ${driveDirectory}
+`;
+}
+
+function centralUserMatchConfig(user, chrootDirectory, driveDirectory) {
+  return `Match User ${user.protocolUsername}
   ChrootDirectory ${chrootDirectory}
   PasswordAuthentication yes
   PubkeyAuthentication no
@@ -61,6 +73,14 @@ export class SftpManager {
     return join(this.chrootPathForDisk(disk), this.driveDirName);
   }
 
+  chrootPathForCentralUser(user) {
+    return join(this.chrootBaseDir, `user-${user.id}`);
+  }
+
+  driveMountPathForCentralUser(user) {
+    return join(this.chrootPathForCentralUser(user), this.driveDirName);
+  }
+
   async applyDisk(disk, allDisks = [disk]) {
     if (!this.enabled) {
       return { applied: false, reason: 'SFTP management disabled by VPS_SFTP_MANAGE_ENABLED' };
@@ -69,7 +89,7 @@ export class SftpManager {
     await mkdir(this.chrootBaseDir, { recursive: true });
     await this.ensureUser(disk.sftpUsername, disk.sftpPassword);
     await this.ensureDriveMount(disk);
-    await this.writeConfig(allDisks);
+    await this.writeConfig({ disks: allDisks });
     await this.restartSftp();
     return {
       applied: true,
@@ -87,9 +107,35 @@ export class SftpManager {
     await this.unmountDrive(disk).catch(() => { });
     await rm(this.chrootPathForDisk(disk), { recursive: true, force: true }).catch(() => { });
     await this.deleteUser(disk.sftpUsername).catch(() => { });
-    await this.writeConfig(remainingDisks);
+    await this.writeConfig({ disks: remainingDisks });
     await this.restartSftp();
     return { applied: true };
+  }
+
+  async applyCentralUsers(users = [], shares = []) {
+    if (!this.enabled) {
+      return { applied: false, reason: 'SFTP management disabled by VPS_SFTP_MANAGE_ENABLED' };
+    }
+
+    await mkdir(this.chrootBaseDir, { recursive: true });
+    const configuredUsers = [];
+    for (const user of users) {
+      const userShares = shares.filter((share) => share?.accessMode === 'centralized').filter((share) => {
+        const direct = share?.accessPolicy?.sftp?.userIds || [];
+        const groupIds = new Set(share?.accessPolicy?.sftp?.groupIds || []);
+        return direct.includes(user.id) || (user.groupIds || []).some((groupId) => groupIds.has(groupId));
+      });
+      if (userShares.length === 0 || user.sftpEnabled === false) {
+        await this.deleteUser(user.protocolUsername).catch(() => { });
+        continue;
+      }
+      await this.ensureUser(user.protocolUsername, user.protocolPassword);
+      await this.ensureCentralUserMounts(user, userShares);
+      configuredUsers.push(user);
+    }
+    await this.writeConfig({ disks: shares.filter((share) => share?.accessMode !== 'centralized'), centralUsers: configuredUsers });
+    await this.restartSftp();
+    return { applied: true, users: configuredUsers.map((user) => user.protocolUsername) };
   }
 
   async ensureUser(username, password) {
@@ -130,12 +176,44 @@ export class SftpManager {
     await runCommand('sh', ['-lc', `mountpoint -q ${shellQuote(drivePath)} && umount ${shellQuote(drivePath)} || true`]);
   }
 
-  async writeConfig(disks) {
+  async ensureCentralUserMounts(user, shares) {
+    const chrootPath = this.chrootPathForCentralUser(user);
+    const drivePath = this.driveMountPathForCentralUser(user);
+    await mkdir(chrootPath, { recursive: true });
+    await mkdir(drivePath, { recursive: true });
+    await runCommand('sh', ['-lc', `chown root:root ${shellQuote(chrootPath)} ${shellQuote(drivePath)} && chmod 755 ${shellQuote(chrootPath)} ${shellQuote(drivePath)}`]);
+
+    let existingEntries = [];
+    try {
+      existingEntries = await readdir(drivePath, { withFileTypes: true });
+    } catch {
+      existingEntries = [];
+    }
+    for (const entry of existingEntries) {
+      const target = join(drivePath, entry.name);
+      await runCommand('sh', ['-lc', `mountpoint -q ${shellQuote(target)} && umount ${shellQuote(target)} || true`]).catch(() => { });
+      await rm(target, { recursive: true, force: true }).catch(() => { });
+    }
+
+    for (const share of shares) {
+      const target = join(drivePath, share.smbShareName);
+      await mkdir(target, { recursive: true });
+      await runCommand('sh', ['-lc', `chown root:root ${shellQuote(target)} && chmod 755 ${shellQuote(target)}`]);
+      await runCommand('sh', ['-lc', `(mountpoint -q ${shellQuote(target)} && umount ${shellQuote(target)} || true) && mount --bind ${shellQuote(share.storagePath)} ${shellQuote(target)}`]);
+    }
+  }
+
+  async writeConfig({ disks = [], centralUsers = [] } = {}) {
     const orderedDisks = [...disks]
       .filter((disk) => disk?.id && disk?.sftpUsername)
       .sort((left, right) => left.id.localeCompare(right.id));
-    const content = orderedDisks
-      .map((disk) => driveMatchConfig(disk, this.chrootPathForDisk(disk), this.visibleDrivePath()))
+    const orderedUsers = [...centralUsers]
+      .filter((user) => user?.id && user?.protocolUsername)
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const content = [
+      ...orderedDisks.map((disk) => driveMatchConfig(disk, this.chrootPathForDisk(disk), this.visibleDrivePath())),
+      ...orderedUsers.map((user) => centralUserMatchConfig(user, this.chrootPathForCentralUser(user), this.visibleDrivePath()))
+    ]
       .join('\n');
     await mkdir(dirname(this.generatedConfPath), { recursive: true });
     await writeFile(this.generatedConfPath, content ? `${content}\n` : '', 'utf8');

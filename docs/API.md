@@ -1,129 +1,180 @@
 # API Reference
 
-There are two API surfaces:
+The project exposes:
 
-- Admin API: `/admin/api/*` (session cookie auth)
-- Public API: `/api/*` (bearer token auth)
+- an admin API at `/admin/api/*`
+- a public API at `/api/*`
+- an unauthenticated health endpoint at `/health`
 
-Health endpoint is unauthenticated:
+Compatibility note:
 
-- `GET /health`
+- `shares` is the primary object model
+- `disks` remains available as a deprecated alias
 
-## Authentication
+## 1. Authentication
 
-### Admin API auth (session)
+### Admin API
 
-1. Login:
+Session-cookie based:
 
-```http
-POST /admin/api/login
-Content-Type: application/json
+1. `POST /admin/api/login`
+2. use the `tm_admin_session` cookie
+3. `POST /admin/api/logout`
+4. `GET /admin/api/session`
 
-{"username":"admin","password":"..."}
-```
+### Public API
 
-2. Use returned cookie (`tm_admin_session`) for further admin requests.
-
-3. Logout:
-
-- `POST /admin/api/logout`
-
-4. Session status:
-
-- `GET /admin/api/session`
-
-### Public API auth (bearer)
-
-Include header:
+Bearer token:
 
 ```http
 Authorization: Bearer <VPS_API_TOKEN>
 ```
 
-## Common admin endpoints
+## 2. Health
+
+- `GET /health`
+
+Returns basic runtime status.
+
+## 3. Admin API overview
+
+### State and settings
 
 - `GET /admin/api/state`
-  - Full dashboard state: settings, `settingsConfig` (value/source/locked per dual-source setting), samba/sftp info, mounts, disks, postgres readiness
-- `PUT /admin/api/settings`
-  - Update global settings (`hostname`, `rootShareName`, `smbPublicPort`, feature toggles, SMB streams backend, mount poll interval, auth/session settings, VPS cache knobs, enterprise/auth/directory/OIDC/postgres settings)
-  - Returns HTTP `400` if attempting to update a setting locked by `*_FORCE` env
 - `POST /admin/api/setup`
-  - Initial setup workflow (same setting coverage as `/admin/api/settings`, plus setup completion)
+- `PUT /admin/api/settings`
 - `GET /admin/api/samba/status`
-  - Samba manager runtime status
 
-## Admin mounts endpoints
+`/admin/api/state` is the main dashboard bootstrap payload and includes:
+
+- settings
+- settings source and lock metadata
+- Samba status
+- SFTP status
+- mount status
+- shares
+- deprecated disks alias
+- users
+- groups
+- identity providers
+
+### Mounts
 
 - `GET /admin/api/mounts`
 - `POST /admin/api/mounts`
-  - Required: `name`, `mountPath`
-  - Provider-specific fields: S3 credentials/bucket/etc, or rclone remote path
 - `PUT /admin/api/mounts/:mountId`
 - `POST /admin/api/mounts/:mountId/ensure`
 - `POST /admin/api/mounts/:mountId/unmount`
 - `DELETE /admin/api/mounts/:mountId`
 
-Mount deletion fails if any disk still references the mount.
+### Shares
 
-## Admin disks endpoints
+Primary endpoints:
 
-- `POST /admin/api/disks`
-  - Create disk (supports `local`, `cloud-mount`, `cloudmounter/filesystem`)
-- `PUT /admin/api/disks/:diskId`
-  - Update disk fields and storage mapping
-- `POST /admin/api/disks/:diskId/password`
-  - Rotate SMB password (custom or auto-generated)
-- `POST /admin/api/disks/:diskId/sftp-password`
-  - Rotate SFTP password (custom or auto-generated)
-- `POST /admin/api/disks/:diskId/apply-samba`
-  - Re-apply Samba user/share config
-- `POST /admin/api/disks/:diskId/apply-sftp`
-  - Re-apply drive-scoped SFTP user/chroot config
-- `DELETE /admin/api/disks/:diskId`
-  - Body optional: `{"deleteData":true}`
+- `POST /admin/api/shares`
+- `PUT /admin/api/shares/:shareId`
+- `POST /admin/api/shares/:shareId/password`
+- `POST /admin/api/shares/:shareId/sftp-password`
+- `POST /admin/api/shares/:shareId/apply-samba`
+- `POST /admin/api/shares/:shareId/apply-sftp`
+- `DELETE /admin/api/shares/:shareId`
 
-## Admin logs and terminal
+Compatibility aliases:
+
+- `/admin/api/disks`
+- `/admin/api/disks/:diskId`
+- matching password/apply/delete routes
+
+### Centralized identity
+
+- `GET /admin/api/users`
+- `POST /admin/api/users`
+- `PUT /admin/api/users/:userId`
+- `DELETE /admin/api/users/:userId`
+
+- `GET /admin/api/groups`
+- `POST /admin/api/groups`
+- `PUT /admin/api/groups/:groupId`
+- `DELETE /admin/api/groups/:groupId`
+
+- `GET /admin/api/identity-providers`
+- `POST /admin/api/identity-providers`
+- `PUT /admin/api/identity-providers/:providerId`
+- `DELETE /admin/api/identity-providers/:providerId`
+
+### Logs and terminal
 
 - `GET /admin/api/logs`
-  - Snapshot of buffered logs
 - `GET /admin/api/logs/stream`
-  - SSE stream of live logs
 - `GET /admin/api/log-tail/sources`
-  - List tail-able sources (service logs and visible docker containers)
-- `GET /admin/api/log-tail/stream?source=<id>&lines=<n>`
-  - SSE tail stream
-
-Terminal session API:
-
+- `GET /admin/api/log-tail/stream`
 - `POST /admin/api/terminal/sessions`
 - `GET /admin/api/terminal/sessions/:sessionId`
-- `GET /admin/api/terminal/sessions/:sessionId/stream` (SSE)
+- `GET /admin/api/terminal/sessions/:sessionId/stream`
 - `POST /admin/api/terminal/sessions/:sessionId/input`
 - `DELETE /admin/api/terminal/sessions/:sessionId`
 
-## Public API endpoints
+## 4. Public API overview
+
+Primary endpoints:
+
+- `GET /api/shares`
+- `POST /api/shares`
+- `DELETE /api/shares/:shareId`
+- `GET /api/smb`
+- `GET /api/sftp`
+- `GET /api/shares/:shareId/files`
+- `PUT /api/shares/:shareId/file`
+- `GET /api/shares/:shareId/file`
+- `DELETE /api/shares/:shareId/file`
+
+Compatibility aliases:
 
 - `GET /api/disks`
-  - List disks metadata
 - `POST /api/disks`
-  - Create disk (same storage model semantics)
 - `DELETE /api/disks/:diskId`
-  - Optional body `{"deleteData":true|false}` (defaults to true)
-- `GET /api/smb`
-  - Root SMB details and disk URLs
-- `GET /api/sftp`
-  - Root SFTP details and per-disk drive URLs
-- `GET /api/disks/:diskId/files?prefix=...`
-  - Recursive file listing
-- `PUT /api/disks/:diskId/file?path=<rel>&mtimeMs=<ms>`
-  - Write file body stream
-- `GET /api/disks/:diskId/file?path=<rel>`
-  - Read file stream
-- `DELETE /api/disks/:diskId/file?path=<rel>`
+- `GET /api/disks/:diskId/files`
+- `PUT /api/disks/:diskId/file`
+- `GET /api/disks/:diskId/file`
+- `DELETE /api/disks/:diskId/file`
 
-## cURL examples
+## 5. Share payload model
 
-### Login to admin API
+A typical share response includes:
+
+```json
+{
+  "id": "share-1",
+  "name": "Archive",
+  "storageMode": "local",
+  "storagePath": "/data/vps/smb-share/share-1",
+  "accessMode": "centralized",
+  "smb": {
+    "shareName": "archive",
+    "url": "smb://server/archive",
+    "profile": "mac-share",
+    "timeMachineEnabled": false,
+    "timeMachineQuotaGb": 0,
+    "authMode": "centralized"
+  },
+  "sftp": {
+    "enabled": true,
+    "path": "/drive/archive",
+    "authMode": "centralized"
+  },
+  "access": {
+    "mode": "centralized",
+    "users": [],
+    "groups": []
+  }
+}
+```
+
+Legacy fields such as `diskShareUrl`, `smbUsername`, and `sftpUsername` still exist for compatibility where legacy mode is active.
+
+## 6. Common workflows
+
+### Log in to the admin API
 
 ```bash
 curl -i \
@@ -132,7 +183,7 @@ curl -i \
   -d '{"username":"admin","password":"YOUR_PASSWORD"}'
 ```
 
-### Read admin state with session cookie
+### Read dashboard state
 
 ```bash
 curl -sS \
@@ -140,27 +191,79 @@ curl -sS \
   -H 'cookie: tm_admin_session=<TOKEN>' | jq
 ```
 
-### List disks via public API
+### List shares
 
 ```bash
 curl -sS \
-  http://127.0.0.1:8788/api/disks \
+  http://127.0.0.1:8788/api/shares \
   -H 'authorization: Bearer YOUR_API_TOKEN' | jq
 ```
 
-### Upload a file into a disk
+### Create a local share
 
 ```bash
 curl -sS \
-  -X PUT "http://127.0.0.1:8788/api/disks/<disk-id>/file?path=test.bin" \
+  -X POST http://127.0.0.1:8787/admin/api/shares \
+  -H 'content-type: application/json' \
+  -H 'cookie: tm_admin_session=<TOKEN>' \
+  -d '{
+    "name": "Team Files",
+    "storageMode": "local",
+    "shareName": "team-files",
+    "timeMachineEnabled": false,
+    "accessMode": "legacy-per-share"
+  }' | jq
+```
+
+### Create a centralized local user
+
+```bash
+curl -sS \
+  -X POST http://127.0.0.1:8787/admin/api/users \
+  -H 'content-type: application/json' \
+  -H 'cookie: tm_admin_session=<TOKEN>' \
+  -d '{
+    "username": "alice",
+    "displayName": "Alice",
+    "authType": "local",
+    "password": "replace-me",
+    "protocolUsername": "alice",
+    "protocolPassword": "replace-me-too",
+    "isAdmin": true
+  }' | jq
+```
+
+### Create a centralized share
+
+```bash
+curl -sS \
+  -X POST http://127.0.0.1:8787/admin/api/shares \
+  -H 'content-type: application/json' \
+  -H 'cookie: tm_admin_session=<TOKEN>' \
+  -d '{
+    "name": "Design Files",
+    "storageMode": "local",
+    "shareName": "design-files",
+    "accessMode": "centralized",
+    "accessPolicy": {
+      "smb": { "groupIds": ["designers"] },
+      "sftp": { "groupIds": ["designers"] }
+    }
+  }' | jq
+```
+
+### Upload a file through the public API
+
+```bash
+curl -sS \
+  -X PUT "http://127.0.0.1:8788/api/shares/<share-id>/file?path=test.bin" \
   -H 'authorization: Bearer YOUR_API_TOKEN' \
   --data-binary @./test.bin
 ```
 
-## Notes
+## 7. Current limitations
 
-- Admin sessions are in-memory only and are cleared on service restart.
-- Dual-source settings precedence is: `*_FORCE` env -> UI value -> `*_DEFAULT` env -> app default.
-- Setup/settings config persistence requires Postgres to be enabled and configured.
-- Many admin/public write operations return HTTP `409` for ID/name conflicts.
-- Mount and Samba operations can fail with actionable error messages; inspect `/admin/api/state` runtime sections for details.
+- `shares` and `disks` coexist during a compatibility window
+- centralized local users work today
+- OIDC and LDAP/AD are not fully complete as live provider-backed auth flows yet
+- WebDAV and NFS are not implemented yet

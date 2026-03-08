@@ -8,10 +8,12 @@ const disk = {
   smbShareName: 'tm-disk',
   storagePath: '/data/vps/smb-share/disk-1',
   smbUsername: 'tm_disk',
-  quotaGb: 512
+  quotaGb: 512,
+  timeMachineEnabled: true,
+  timeMachineQuotaGb: 512
 };
 
-test('disk share config uses macOS-friendly VFS ordering and only real shares advertise Time Machine', () => {
+test('time machine shares keep the macOS-friendly VFS ordering and advertise Time Machine', () => {
   const config = buildDiskShareConfig(disk, 'xattr');
 
   assert.match(config, /\[tm-disk\]/);
@@ -24,6 +26,19 @@ test('disk share config uses macOS-friendly VFS ordering and only real shares ad
   assert.match(config, /fruit:encoding = native/);
   assert.doesNotMatch(config, /spotlight backend =/);
   assert.doesNotMatch(config, /fruit:aapl = yes/);
+});
+
+test('mac share config omits time machine markers by default', () => {
+  const config = buildDiskShareConfig({
+    ...disk,
+    timeMachineEnabled: false,
+    timeMachineQuotaGb: 0
+  }, 'xattr', { users: ['alice', 'bob'] });
+
+  assert.match(config, /valid users = alice bob/);
+  assert.doesNotMatch(config, /fruit:time machine = yes/);
+  assert.doesNotMatch(config, /fruit:time machine max size =/);
+  assert.doesNotMatch(config, /durable handles = yes/);
 });
 
 test('disk share config normalizes depot stream backend names', () => {
