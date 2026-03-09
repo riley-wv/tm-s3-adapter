@@ -1,108 +1,19 @@
-export interface DashboardState {
-  settings: Settings;
-  settingsConfig: Record<string, SettingDescriptor>;
-  postgres: { configured?: boolean; required?: boolean };
-  samba: SambaStatus;
-  sftp: SftpInfo;
-  mounts: Mount[];
-  mountManager: MountManagerStatus;
-  shares: Disk[];
-  disks: Disk[];
-  users: CentralUser[];
-  groups: Group[];
-  identityProviders: IdentityProvider[];
-  groupMappings?: unknown[];
-}
+export type TabId = 'shares' | 'mounts' | 'logs' | 'settings';
+export type ThemeMode = 'light' | 'dark' | 'system';
+export type StatusTone = 'success' | 'warning' | 'error' | 'muted';
 
-export interface Settings {
-  hostname: string;
-  browseShareName: string;
-  browseShareEnabled: boolean;
-  rootShareName: string;
-  smbPublicPort: number;
-  smbEnabled: boolean;
-  sftpEnabled: boolean;
-  mountManagementEnabled: boolean;
-  smbStreamsBackend: string;
-  mountPollSeconds: number;
-  vpsCacheDir: string;
-  vpsCacheEnabled: boolean;
-  vpsWriteBackSeconds: number;
-  vpsCacheMaxSizeGb: number;
-  vpsCacheMaxAgeHours: number;
-  vpsReadAheadMb: number;
-  adminUsername: string;
-  adminSessionSeconds: number;
-  apiTokenConfigured: boolean;
-  setupCompleted: boolean;
-  enterpriseFeaturesEnabled: boolean;
-  adminAuthMode: string;
-  smbAuthMode: string;
-  sftpAuthMode: string;
-  securityIpAllowlist: string;
-  securityBreakGlassEnabled: boolean;
-  securityAuditRetentionDays: number;
-  oidcIssuer: string;
-  oidcClientId: string;
-  oidcClientSecret: string;
-  oidcScopes: string;
-  oidcAdminGroup: string;
-  oidcReadOnlyGroup: string;
-  directoryDomain: string;
-  directoryRealm: string;
-  directoryUrl: string;
-  directoryBindDn: string;
-  directoryBindPassword: string;
-  workgroupMappingsJson: string;
-  mountPolicyMode: string;
-  postgresEnabled: boolean;
-  postgresHost: string;
-  postgresPort: number;
-  postgresDatabase: string;
-  postgresUser: string;
-  postgresPassword: string;
-  postgresSslMode: string;
-}
-
-export interface SettingDescriptor {
-  source?: string;
-  locked?: boolean;
-}
-
-export interface SambaStatus {
-  enabled: boolean;
-  effectiveEnabled: boolean;
-  settingEnabled: boolean;
-  confDir: string;
-  mainConf: string;
-  streamsBackend: string;
-}
-
-export interface SftpInfo {
-  enabled: boolean;
-  host?: string;
-  port?: number;
-  username?: string;
-  password?: string;
-  rootPath?: string;
-  url?: string;
-  drivePath?: string;
-}
-
-export interface MountManagerStatus {
-  enabled: boolean;
-  effectiveEnabled: boolean;
-  settingEnabled: boolean;
-  pollSeconds: number;
-  cacheDir?: string;
-  cachePolicy?: string;
+export interface MountRuntime {
+  lastStatus?: string;
+  lastCheckedAt?: string;
+  lastMountedAt?: string;
+  lastError?: string;
 }
 
 export interface Mount {
   id: string;
   name: string;
   provider: string;
-  remotePath: string;
+  remotePath?: string;
   mountPath: string;
   bucket?: string;
   prefix?: string;
@@ -117,70 +28,57 @@ export interface Mount {
   runtime?: MountRuntime;
 }
 
-export interface MountRuntime {
-  id: string;
-  name: string;
-  provider: string;
-  lastStatus: string;
-  lastCheckedAt?: string;
-  lastMountedAt?: string;
-  lastError?: string;
+export interface DiskAccess {
+  mode?: string;
+  users?: Array<{ id: string; username: string }>;
+  groups?: Array<{ id: string; name: string }>;
+  policy?: {
+    smb?: { userIds?: string[]; groupIds?: string[] };
+    sftp?: { userIds?: string[]; groupIds?: string[] };
+  };
+}
+
+export interface DiskSmb {
+  shareName?: string;
+  url?: string;
+  rootUrl?: string;
+  timeMachineEnabled?: boolean;
+  legacyUsername?: string;
+  legacyPassword?: string;
+  authMode?: string;
+}
+
+export interface DiskSftp {
+  url?: string;
+  path?: string;
+  legacyUsername?: string;
+  legacyPassword?: string;
+  authMode?: string;
 }
 
 export interface Disk {
   id: string;
   name: string;
-  quotaGb: number;
-  timeMachineEnabled: boolean;
-  timeMachineQuotaGb: number;
-  accessMode: string;
-  storageMode: string;
+  timeMachineEnabled?: boolean;
+  timeMachineQuotaGb?: number;
+  quotaGb?: number;
+  accessMode?: string;
+  access?: DiskAccess;
+  storageMode?: string;
   storageMountId?: string;
   storageBasePath?: string;
   storagePath?: string;
-  smbShareName: string;
+  smbShareName?: string;
   smbUsername?: string;
   smbPassword?: string;
   sftpUsername?: string;
   sftpPassword?: string;
   sftpUrl?: string;
   sftpPath?: string;
-  sftpEnabled?: boolean;
   diskShareUrl?: string;
   rootShareUrl?: string;
-  rootSubdirUrl?: string;
-  createdAt?: string;
-  updatedAt?: string;
-  smb?: {
-    shareName?: string;
-    url?: string;
-    rootUrl?: string;
-    rootSubdirUrl?: string;
-    timeMachineEnabled?: boolean;
-    timeMachineQuotaGb?: number;
-    authMode?: string;
-    legacyUsername?: string;
-    legacyPassword?: string;
-    users?: { username: string }[];
-  };
-  sftp?: {
-    enabled?: boolean;
-    url?: string;
-    path?: string;
-    authMode?: string;
-    legacyUsername?: string;
-    legacyPassword?: string;
-    users?: { username: string }[];
-  };
-  access?: {
-    mode?: string;
-    users?: { username: string }[];
-    groups?: { name: string }[];
-    policy?: {
-      smb?: { userIds?: string[]; groupIds?: string[] };
-      sftp?: { userIds?: string[]; groupIds?: string[] };
-    };
-  };
+  smb?: DiskSmb;
+  sftp?: DiskSftp;
 }
 
 export interface CentralUser {
@@ -188,7 +86,6 @@ export interface CentralUser {
   username: string;
   displayName?: string;
   authType: string;
-  protocolUsername?: string;
   enabled: boolean;
   isAdmin: boolean;
   smbEnabled: boolean;
@@ -213,11 +110,105 @@ export interface IdentityProvider {
   config?: Record<string, string>;
 }
 
+export interface SettingDescriptor {
+  source?: string;
+  locked?: boolean;
+}
+
+export interface Settings {
+  setupCompleted?: boolean;
+  adminUsername?: string;
+  adminSessionSeconds?: number;
+  hostname?: string;
+  rootShareName?: string;
+  browseShareName?: string;
+  browseShareEnabled?: boolean;
+  smbPublicPort?: number;
+  smbEnabled?: boolean;
+  sftpEnabled?: boolean;
+  mountManagementEnabled?: boolean;
+  smbStreamsBackend?: string;
+  mountPollSeconds?: number;
+  vpsCacheDir?: string;
+  vpsCacheEnabled?: boolean;
+  vpsWriteBackSeconds?: number;
+  vpsCacheMaxSizeGb?: number;
+  vpsCacheMaxAgeHours?: number;
+  vpsReadAheadMb?: number;
+  enterpriseFeaturesEnabled?: boolean;
+  adminAuthMode?: string;
+  smbAuthMode?: string;
+  sftpAuthMode?: string;
+  securityIpAllowlist?: string;
+  securityBreakGlassEnabled?: boolean;
+  securityAuditRetentionDays?: number;
+  oidcIssuer?: string;
+  oidcClientId?: string;
+  oidcClientSecret?: string;
+  oidcScopes?: string;
+  oidcAdminGroup?: string;
+  oidcReadOnlyGroup?: string;
+  directoryDomain?: string;
+  directoryRealm?: string;
+  directoryUrl?: string;
+  directoryBindDn?: string;
+  directoryBindPassword?: string;
+  workgroupMappingsJson?: string;
+  mountPolicyMode?: string;
+  postgresEnabled?: boolean;
+  postgresHost?: string;
+  postgresPort?: number;
+  postgresDatabase?: string;
+  postgresUser?: string;
+  postgresPassword?: string;
+  postgresSslMode?: string;
+  apiTokenConfigured?: boolean;
+}
+
+export interface SambaStatus {
+  effectiveEnabled?: boolean;
+  settingEnabled?: boolean;
+  confDir?: string;
+}
+
+export interface MountManagerStatus {
+  effectiveEnabled?: boolean;
+  settingEnabled?: boolean;
+  pollSeconds?: number;
+}
+
+export interface SftpInfo {
+  enabled?: boolean;
+  url?: string;
+  username?: string;
+  password?: string;
+  rootPath?: string;
+}
+
+export interface PostgresInfo {
+  configured?: boolean;
+  required?: boolean;
+}
+
+export interface DashboardState {
+  settings?: Settings;
+  settingsConfig?: Record<string, SettingDescriptor>;
+  mounts?: Mount[];
+  shares?: Disk[];
+  disks?: Disk[];
+  users?: CentralUser[];
+  groups?: Group[];
+  identityProviders?: IdentityProvider[];
+  samba?: SambaStatus;
+  mountManager?: MountManagerStatus;
+  sftp?: SftpInfo;
+  postgres?: PostgresInfo;
+}
+
 export interface LogEntry {
   id: string;
   timestamp: string;
   level: string;
-  source: string;
   message: string;
   host?: string;
   drive?: string;
@@ -225,9 +216,8 @@ export interface LogEntry {
 
 export interface TailSource {
   source: string;
-  label: string;
   type: string;
-  description?: string;
+  label: string;
 }
 
 export interface DiskForm {
@@ -357,6 +347,7 @@ export interface ProviderForm {
   directoryBindPassword: string;
 }
 
-export type TabId = 'drives' | 'mounts' | 'logs' | 'settings';
-
-export type ThemeMode = 'light' | 'dark' | 'system';
+export interface SelectOption {
+  id: string;
+  label: string;
+}

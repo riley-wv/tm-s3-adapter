@@ -1,6 +1,6 @@
-import type { Mount, SettingDescriptor } from './types';
+import type { Mount, Disk, SettingDescriptor, StatusTone } from './types';
 
-export function mountStatus(mount: Mount): { label: string; tone: 'success' | 'warning' | 'error' | 'muted' } {
+export function mountStatus(mount: Mount): { label: string; tone: StatusTone } {
   const status = String(mount?.runtime?.lastStatus || '').toLowerCase();
   if (status === 'mounted') return { label: 'Mounted', tone: 'success' };
   if (status === 'unmounted') return { label: 'Not mounted', tone: 'warning' };
@@ -30,12 +30,17 @@ export function parseExtraArgs(value: string): string[] {
     try {
       const parsed = JSON.parse(trimmed);
       return Array.isArray(parsed) ? parsed.map(String) : [];
-    } catch { return []; }
+    } catch {
+      return [];
+    }
   }
-  return trimmed.split(',').map((s) => s.trim()).filter(Boolean);
+  return trimmed
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
-export function formatExtraArgs(value: unknown): string {
+export function formatExtraArgs(value: string[] | undefined): string {
   if (!Array.isArray(value) || value.length === 0) return '';
   return value.map(String).join(', ');
 }
@@ -44,38 +49,48 @@ export function subdirFromPaths(basePath: string, fullPath: string): string {
   const base = String(basePath || '');
   const full = String(fullPath || '');
   if (!base || !full || full === base) return '';
-  return full.startsWith(`${base}/`) ? full.slice(base.length + 1) : '';
+  if (full.startsWith(`${base}/`)) return full.slice(base.length + 1);
+  return '';
 }
 
-export function formatTimestamp(value?: string | null): string {
-  return value ? new Date(value).toLocaleString() : 'Never';
+export function formatTimestamp(value: string | undefined | null): string {
+  if (!value) return 'Never';
+  return new Date(value).toLocaleString();
 }
 
 export function parseIdList(value: string): string[] {
-  return String(value || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
-export function formatIdList(values: string[] | undefined): string {
+export function formatIdList(values: string[]): string {
   return Array.isArray(values) ? values.join(', ') : '';
 }
 
-export function normalizeLogLevel(value: string): 'error' | 'warning' | 'muted' {
+export function normalizeLogLevel(
+  value: string,
+): 'error' | 'warning' | 'muted' {
   const level = String(value || '').toLowerCase();
   if (level === 'error') return 'error';
   if (level === 'warning' || level === 'warn') return 'warning';
   return 'muted';
 }
 
-export function parseEventData<T = unknown>(event: MessageEvent | null): T | null {
-  try { return JSON.parse(event?.data || '{}'); } catch { return null; }
-}
-
-export function formatTailSourceLabel(source: { type?: string; label?: string } | null): string {
+export function formatTailSourceLabel(source: {
+  type: string;
+  label: string;
+}): string {
   if (!source) return '';
-  return `${source.type === 'container' ? 'Container' : 'Service'}: ${source.label}`;
+  const prefix = source.type === 'container' ? 'Container' : 'Service';
+  return `${prefix}: ${source.label}`;
 }
 
-export function settingSourceLabel(config: Record<string, SettingDescriptor>, key: string): string {
+export function settingSourceLabel(
+  config: Record<string, SettingDescriptor> | undefined,
+  key: string,
+): string {
   const source = config?.[key]?.source || 'app_default';
   if (source === 'force_env') return 'forced by env';
   if (source === 'default_env') return 'env default';
@@ -83,33 +98,56 @@ export function settingSourceLabel(config: Record<string, SettingDescriptor>, ke
   return 'app default';
 }
 
-export function isSettingLocked(config: Record<string, SettingDescriptor>, key: string): boolean {
+export function isSettingLocked(
+  config: Record<string, SettingDescriptor> | undefined,
+  key: string,
+): boolean {
   return config?.[key]?.locked === true;
 }
 
-export async function copyToClipboard(label: string, value: string | undefined): Promise<{ ok: boolean; message: string }> {
-  const text = String(value || '');
-  if (!text) return { ok: false, message: `Nothing to copy for ${label}` };
-  try {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'absolute';
-      ta.style.left = '-9999px';
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      document.body.removeChild(ta);
-    }
-    return { ok: true, message: `${label} copied to clipboard` };
-  } catch (e) {
-    return { ok: false, message: (e as Error).message || `Unable to copy ${label}` };
+export async function copyToClipboard(text: string): Promise<void> {
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+  } else {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'absolute';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textarea);
   }
 }
 
-export function cn(...classes: (string | false | null | undefined)[]): string {
+export function smbConfigTextForDisk(disk: Disk): string {
+  return [
+    `Share: ${disk.name}`,
+    `Share Name: ${disk.smbShareName || disk?.smb?.shareName || ''}`,
+    `Share URL: ${disk.diskShareUrl || disk?.smb?.url || ''}`,
+    `Browse URL: ${disk.rootShareUrl || disk?.smb?.rootUrl || ''}`,
+    `Mode: ${disk?.smb?.authMode || disk.accessMode || 'legacy-per-share'}`,
+    `Username: ${disk.smbUsername || disk?.smb?.legacyUsername || ''}`,
+    `Password: ${disk.smbPassword || disk?.smb?.legacyPassword || ''}`,
+    `Storage Path: ${disk.storagePath || ''}`,
+  ].join('\n');
+}
+
+export function sftpConfigTextForDisk(disk: Disk): string {
+  return [
+    `Share: ${disk.name}`,
+    `URL: ${disk.sftpUrl || disk?.sftp?.url || ''}`,
+    `Path: ${disk.sftpPath || disk?.sftp?.path || ''}`,
+    `Mode: ${disk?.sftp?.authMode || disk.accessMode || 'legacy-per-share'}`,
+    `Username: ${disk.sftpUsername || disk?.sftp?.legacyUsername || ''}`,
+    `Password: ${disk.sftpPassword || disk?.sftp?.legacyPassword || ''}`,
+    `Storage Path: ${disk.storagePath || ''}`,
+  ].join('\n');
+}
+
+export function cn(
+  ...classes: (string | false | null | undefined)[]
+): string {
   return classes.filter(Boolean).join(' ');
 }

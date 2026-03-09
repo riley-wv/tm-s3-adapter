@@ -1,4 +1,11 @@
-import type { DiskForm, MountForm, SettingsForm, UserForm, GroupForm, ProviderForm } from './types';
+import type {
+  DiskForm,
+  MountForm,
+  SettingsForm,
+  UserForm,
+  GroupForm,
+  ProviderForm,
+} from './types';
 
 export const DEFAULT_DISK_FORM: DiskForm = {
   name: '',

@@ -1,223 +1,547 @@
 'use client';
 
-import { useState, useMemo } from 'react';
-import { HardDrive, Plus, Check, Copy, Key, Wrench, Trash2, Pencil, X } from 'lucide-react';
-import { Button, Input, Select, Label, FormGroup, FormGrid, FormActions, Checkbox, Card, CardHeader, CardBody, CardFooter, PageHeader, SectionHeader, InfoItem, EmptyState, Badge } from './ui';
-import type { DashboardState, Disk, DiskForm, Mount } from '../lib/types';
-import { DEFAULT_DISK_FORM } from '../lib/constants';
-import { api } from '../lib/api';
-import { subdirFromPaths, formatIdList, parseIdList, mountRemoteDisplay, copyToClipboard } from '../lib/utils';
+import {
+  Button,
+  Card,
+  Input,
+  Select,
+  FormGroup,
+  Checkbox,
+  EmptyState,
+  PageHeader,
+  InfoItem,
+} from './ui';
+import type { Disk, DiskForm, Mount, SelectOption } from '../lib/types';
+import { copyToClipboard, smbConfigTextForDisk, sftpConfigTextForDisk } from '../lib/utils';
+import { Plus, HardDrive, Pencil, Trash2, Key, Copy, Settings2 } from 'lucide-react';
 
-interface SharesTabProps {
-  dashboard: DashboardState;
-  refresh: () => Promise<void>;
-  setNotice: (msg: string) => void;
-  setError: (msg: string) => void;
+export interface SharesTabProps {
+  shares: Disk[];
+  mounts: Mount[];
+  mountOptions: SelectOption[];
+  userOptions: SelectOption[];
+  groupOptions: SelectOption[];
+  showAddDrive: boolean;
+  onToggleAdd: () => void;
+  diskForm: DiskForm;
+  onDiskFormChange: (patch: Partial<DiskForm>) => void;
+  onCreateDisk: (e: React.FormEvent) => void;
+  editingDiskId: string;
+  editingDiskForm: DiskForm;
+  onEditingDiskFormChange: (patch: Partial<DiskForm>) => void;
+  onStartEdit: (disk: Disk) => void;
+  onCancelEdit: () => void;
+  onUpdateDisk: (e: React.FormEvent) => void;
+  onDiskAction: (diskId: string, action: string) => void;
+  submitting: boolean;
+  smbEnabled: boolean;
+  sftpEnabled: boolean;
+  onNotice: (msg: string) => void;
+  onError: (msg: string) => void;
 }
 
-export function SharesTab({ dashboard, refresh, setNotice, setError }: SharesTabProps) {
-  const shares = dashboard.shares || dashboard.disks || [];
-  const mounts = dashboard.mounts || [];
-  const users = dashboard.users || [];
-  const groups = dashboard.groups || [];
-  const smbEnabled = dashboard.settings?.smbEnabled !== false;
-  const sftpEnabled = dashboard.settings?.sftpEnabled !== false;
+function DiskFormFields({
+  form,
+  onChange,
+  mountOptions,
+  userOptions,
+  groupOptions,
+  idPrefix,
+  smbEnabled,
+  sftpEnabled,
+}: {
+  form: DiskForm;
+  onChange: (patch: Partial<DiskForm>) => void;
+  mountOptions: SelectOption[];
+  userOptions: SelectOption[];
+  groupOptions: SelectOption[];
+  idPrefix: string;
+  smbEnabled: boolean;
+  sftpEnabled: boolean;
+}) {
+  const tmEnabled = form.timeMachineEnabled;
+  const isCloudMount = form.storageMode === 'cloud-mount';
+  const isCloudmounter = form.storageMode === 'cloudmounter';
+  const isCentralized = form.accessMode === 'centralized';
+  const isLegacy = form.accessMode === 'legacy-per-share';
 
-  const [showAdd, setShowAdd] = useState(false);
-  const [diskForm, setDiskForm] = useState<DiskForm>(DEFAULT_DISK_FORM);
-  const [editId, setEditId] = useState('');
-  const [editForm, setEditForm] = useState<DiskForm>(DEFAULT_DISK_FORM);
-  const [busy, setBusy] = useState(false);
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <FormGroup label="Name" htmlFor={`${idPrefix}-name`}>
+        <Input
+          id={`${idPrefix}-name`}
+          type="text"
+          value={form.name}
+          onChange={(e) => onChange({ name: e.target.value })}
+          placeholder="Design Share"
+          required
+        />
+      </FormGroup>
 
-  const mountOptions = useMemo(() => mounts.map((m) => ({ id: m.id, label: `${m.name} (${mountRemoteDisplay(m)})` })), [mounts]);
-  const mountById = useMemo(() => new Map(mounts.map((m) => [m.id, m])), [mounts]);
-  const userOptions = useMemo(() => users.map((u) => ({ id: u.id, label: `${u.username}${u.displayName ? ` (${u.displayName})` : ''}` })), [users]);
-  const groupOptions = useMemo(() => groups.map((g) => ({ id: g.id, label: g.name })), [groups]);
+      <FormGroup label="Time Machine" htmlFor={`${idPrefix}-tm`}>
+        <Select
+          id={`${idPrefix}-tm`}
+          value={form.timeMachineEnabled ? 'enabled' : 'disabled'}
+          onChange={(e) => onChange({ timeMachineEnabled: e.target.value === 'enabled' })}
+        >
+          <option value="disabled">Disabled</option>
+          <option value="enabled">Enabled</option>
+        </Select>
+      </FormGroup>
 
-  const run = async (msg: string, fn: () => Promise<void>) => {
-    setBusy(true);
-    try { await fn(); if (msg) setNotice(msg); } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
-  };
+      <FormGroup label="Time Machine Quota (GB)" htmlFor={`${idPrefix}-quota`} hint="0 for unlimited">
+        <Input
+          id={`${idPrefix}-quota`}
+          type="number"
+          min={0}
+          value={form.timeMachineQuotaGb}
+          onChange={(e) => onChange({ timeMachineQuotaGb: e.target.value })}
+          placeholder="0"
+          disabled={!tmEnabled}
+        />
+      </FormGroup>
 
-  const startEdit = (disk: Disk) => {
-    const mount = disk.storageMountId ? mountById.get(disk.storageMountId) : null;
-    setEditId(disk.id);
-    setEditForm({
-      name: disk.name || '',
-      timeMachineEnabled: disk.timeMachineEnabled === true || disk?.smb?.timeMachineEnabled === true,
-      timeMachineQuotaGb: String(disk.timeMachineQuotaGb ?? disk.quotaGb ?? 0),
-      accessMode: disk.accessMode || disk?.access?.mode || 'legacy-per-share',
-      smbUserIds: formatIdList(disk?.access?.policy?.smb?.userIds),
-      smbGroupIds: formatIdList(disk?.access?.policy?.smb?.groupIds),
-      sftpUserIds: formatIdList(disk?.access?.policy?.sftp?.userIds),
-      sftpGroupIds: formatIdList(disk?.access?.policy?.sftp?.groupIds),
-      storageMode: disk.storageMode || 'local',
-      storageMountId: disk.storageMountId || '',
-      storageSubdir: subdirFromPaths(mount?.mountPath || disk.storageBasePath || '', disk.storagePath || ''),
-      storagePath: disk.storageBasePath || disk.storagePath || '',
-      shareName: disk.smbShareName || disk?.smb?.shareName || '',
-      smbUsername: disk.smbUsername || disk?.smb?.legacyUsername || '',
-      smbPassword: disk.smbPassword || disk?.smb?.legacyPassword || '',
-      sftpUsername: disk.sftpUsername || disk?.sftp?.legacyUsername || '',
-      sftpPassword: disk.sftpPassword || disk?.sftp?.legacyPassword || '',
-      applySamba: true,
-      applySftp: true,
-    });
-  };
+      <FormGroup label="Storage Mode" htmlFor={`${idPrefix}-storage-mode`}>
+        <Select
+          id={`${idPrefix}-storage-mode`}
+          value={form.storageMode}
+          onChange={(e) => onChange({ storageMode: e.target.value })}
+        >
+          <option value="local">Local</option>
+          <option value="cloud-mount">Cloud Mount</option>
+          <option value="cloudmounter">Custom Path</option>
+        </Select>
+      </FormGroup>
 
-  const buildPayload = (form: DiskForm) => {
-    const p: Record<string, unknown> = {
-      name: form.name.trim(),
-      timeMachineEnabled: form.timeMachineEnabled,
-      timeMachineQuotaGb: Number(form.timeMachineQuotaGb || 0),
-      accessMode: form.accessMode,
-      accessPolicy: { smb: { userIds: parseIdList(form.smbUserIds), groupIds: parseIdList(form.smbGroupIds) }, sftp: { userIds: parseIdList(form.sftpUserIds), groupIds: parseIdList(form.sftpGroupIds) } },
-      storageMode: form.storageMode,
-      applySamba: smbEnabled && form.applySamba,
-      applySftp: sftpEnabled && form.applySftp,
-    };
-    if (form.shareName.trim()) p.smbShareName = form.shareName.trim();
-    if (form.accessMode === 'legacy-per-share') {
-      if (form.smbUsername.trim()) p.smbUsername = form.smbUsername.trim();
-      if (form.smbPassword) p.smbPassword = form.smbPassword;
-      if (form.sftpUsername.trim()) p.sftpUsername = form.sftpUsername.trim();
-      if (form.sftpPassword) p.sftpPassword = form.sftpPassword;
-    }
-    if (form.storageMode === 'cloud-mount') { p.storageMountId = form.storageMountId || undefined; p.storageSubdir = form.storageSubdir.trim() || undefined; }
-    if (form.storageMode === 'cloudmounter') { p.storagePath = form.storagePath.trim() || undefined; }
-    return p;
-  };
+      {isCloudMount && (
+        <>
+          <FormGroup label="Cloud Mount" htmlFor={`${idPrefix}-mount`}>
+            <Select
+              id={`${idPrefix}-mount`}
+              value={form.storageMountId}
+              onChange={(e) => onChange({ storageMountId: e.target.value })}
+              required
+            >
+              <option value="">Select a mount...</option>
+              {mountOptions.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </Select>
+          </FormGroup>
+          <FormGroup label="Subdirectory" htmlFor={`${idPrefix}-subdir`} hint="optional">
+            <Input
+              id={`${idPrefix}-subdir`}
+              type="text"
+              value={form.storageSubdir}
+              onChange={(e) => onChange({ storageSubdir: e.target.value })}
+              placeholder="Optional subfolder"
+            />
+          </FormGroup>
+        </>
+      )}
 
-  const handleCreate = (e: React.FormEvent) => { e.preventDefault(); run('Share created successfully!', async () => { await api('/admin/api/shares', { method: 'POST', body: JSON.stringify(buildPayload(diskForm)) }); setDiskForm(DEFAULT_DISK_FORM); setShowAdd(false); await refresh(); }); };
+      {isCloudmounter && (
+        <FormGroup label="Filesystem Path" htmlFor={`${idPrefix}-path`}>
+          <Input
+            id={`${idPrefix}-path`}
+            type="text"
+            value={form.storagePath}
+            onChange={(e) => onChange({ storagePath: e.target.value })}
+            placeholder="/mnt/my-storage"
+            required
+          />
+        </FormGroup>
+      )}
 
-  const handleUpdate = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editId) return;
-    const currentDisk = shares.find((d) => d.id === editId);
-    if (!currentDisk) { setError('Share no longer exists'); return; }
-    run('Share updated successfully.', async () => {
-      const payload = buildPayload(editForm);
-      await api(`/admin/api/shares/${editId}`, { method: 'PUT', body: JSON.stringify(payload) });
-      if (editForm.accessMode === 'legacy-per-share' && editForm.smbPassword !== currentDisk.smbPassword) {
-        if (!editForm.smbPassword) throw new Error('SMB password cannot be empty');
-        await api(`/admin/api/shares/${editId}/password`, { method: 'POST', body: JSON.stringify({ password: editForm.smbPassword }) });
-      }
-      if (editForm.accessMode === 'legacy-per-share' && editForm.sftpPassword !== currentDisk.sftpPassword) {
-        if (!editForm.sftpPassword) throw new Error('SFTP password cannot be empty');
-        await api(`/admin/api/shares/${editId}/sftp-password`, { method: 'POST', body: JSON.stringify({ password: editForm.sftpPassword }) });
-      }
-      setEditId(''); setEditForm(DEFAULT_DISK_FORM); await refresh();
-    });
-  };
+      <FormGroup label="SMB Share Name" htmlFor={`${idPrefix}-share`} hint="auto-generated if empty">
+        <Input
+          id={`${idPrefix}-share`}
+          type="text"
+          value={form.shareName}
+          onChange={(e) => onChange({ shareName: e.target.value })}
+          placeholder="Auto-generated if empty"
+        />
+      </FormGroup>
 
-  const action = (id: string, act: string) => run('', async () => {
-    if (act === 'rotate') { await api(`/admin/api/shares/${id}/password`, { method: 'POST', body: '{}' }); setNotice('SMB password rotated'); }
-    if (act === 'rotate-sftp') { await api(`/admin/api/shares/${id}/sftp-password`, { method: 'POST', body: '{}' }); setNotice('SFTP password rotated'); }
-    if (act === 'apply') { await api(`/admin/api/shares/${id}/apply-samba`, { method: 'POST', body: '{}' }); setNotice('Samba configuration applied'); }
-    if (act === 'apply-sftp') { await api(`/admin/api/shares/${id}/apply-sftp`, { method: 'POST', body: '{}' }); setNotice('SFTP configuration applied'); }
-    if (act === 'delete') { if (!window.confirm(`Delete share "${id}"? This cannot be undone.`)) return; await api(`/admin/api/shares/${id}`, { method: 'DELETE', body: JSON.stringify({ deleteData: false }) }); setNotice('Share deleted'); }
-    await refresh();
-  });
+      <FormGroup label="Access Mode" htmlFor={`${idPrefix}-access`}>
+        <Select
+          id={`${idPrefix}-access`}
+          value={form.accessMode}
+          onChange={(e) => onChange({ accessMode: e.target.value })}
+        >
+          <option value="legacy-per-share">Legacy per-share credentials</option>
+          <option value="centralized">Centralized users and groups</option>
+        </Select>
+      </FormGroup>
 
-  const cp = async (label: string, value?: string) => { const r = await copyToClipboard(label, value); r.ok ? setNotice(r.message) : setError(r.message); };
+      {isCentralized && (
+        <>
+          <FormGroup label="SMB User IDs" htmlFor={`${idPrefix}-smb-users`}>
+            <Input
+              id={`${idPrefix}-smb-users`}
+              type="text"
+              value={form.smbUserIds}
+              onChange={(e) => onChange({ smbUserIds: e.target.value })}
+              placeholder={userOptions.map((u) => u.id).join(', ') || 'user-id-1, user-id-2'}
+            />
+          </FormGroup>
+          <FormGroup label="SMB Group IDs" htmlFor={`${idPrefix}-smb-groups`}>
+            <Input
+              id={`${idPrefix}-smb-groups`}
+              type="text"
+              value={form.smbGroupIds}
+              onChange={(e) => onChange({ smbGroupIds: e.target.value })}
+              placeholder={groupOptions.map((g) => g.id).join(', ') || 'group-id-1, group-id-2'}
+            />
+          </FormGroup>
+          <FormGroup label="SFTP User IDs" htmlFor={`${idPrefix}-sftp-users`}>
+            <Input
+              id={`${idPrefix}-sftp-users`}
+              type="text"
+              value={form.sftpUserIds}
+              onChange={(e) => onChange({ sftpUserIds: e.target.value })}
+              placeholder={userOptions.map((u) => u.id).join(', ') || 'user-id-1, user-id-2'}
+            />
+          </FormGroup>
+          <FormGroup label="SFTP Group IDs" htmlFor={`${idPrefix}-sftp-groups`}>
+            <Input
+              id={`${idPrefix}-sftp-groups`}
+              type="text"
+              value={form.sftpGroupIds}
+              onChange={(e) => onChange({ sftpGroupIds: e.target.value })}
+              placeholder={groupOptions.map((g) => g.id).join(', ') || 'group-id-1, group-id-2'}
+            />
+          </FormGroup>
+        </>
+      )}
 
-  const renderForm = (form: DiskForm, setForm: React.Dispatch<React.SetStateAction<DiskForm>>, onSubmit: (e: React.FormEvent) => void, isEdit: boolean) => {
-    const set = <K extends keyof DiskForm>(k: K, v: DiskForm[K]) => setForm((p) => ({ ...p, [k]: v }));
-    return (
-      <form onSubmit={onSubmit}>
-        <FormGrid>
-          <FormGroup><Label>Share Name</Label><Input value={form.name} onChange={(e) => set('name', e.target.value)} placeholder="Design Share" required /></FormGroup>
-          <FormGroup><Label>Time Machine Destination</Label><Select value={form.timeMachineEnabled ? 'enabled' : 'disabled'} onChange={(e) => set('timeMachineEnabled', e.target.value === 'enabled')}><option value="disabled">Disabled</option><option value="enabled">Enabled</option></Select></FormGroup>
-          <FormGroup><Label>Time Machine Quota (GB)</Label><Input type="number" min={0} value={form.timeMachineQuotaGb} onChange={(e) => set('timeMachineQuotaGb', e.target.value)} placeholder="0 for unlimited" disabled={!form.timeMachineEnabled} /></FormGroup>
-          <FormGroup><Label>Storage Mode</Label><Select value={form.storageMode} onChange={(e) => set('storageMode', e.target.value)}><option value="local">Local Storage</option><option value="cloud-mount">Cloud Mount</option><option value="cloudmounter">Custom Path</option></Select></FormGroup>
-          {form.storageMode === 'cloud-mount' && <>
-            <FormGroup><Label>Cloud Mount</Label><Select value={form.storageMountId} onChange={(e) => set('storageMountId', e.target.value)} required><option value="">Select a mount...</option>{mountOptions.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</Select></FormGroup>
-            <FormGroup><Label>Subdirectory</Label><Input value={form.storageSubdir} onChange={(e) => set('storageSubdir', e.target.value)} placeholder="Optional subfolder" /></FormGroup>
-          </>}
-          {form.storageMode === 'cloudmounter' && <FormGroup><Label>Filesystem Path</Label><Input value={form.storagePath} onChange={(e) => set('storagePath', e.target.value)} placeholder="/mnt/my-storage" required /></FormGroup>}
-          <FormGroup><Label>SMB Share Name</Label><Input value={form.shareName} onChange={(e) => set('shareName', e.target.value)} placeholder={isEdit ? '' : 'Auto-generated if empty'} required={isEdit} /></FormGroup>
-          <FormGroup><Label>Access Mode</Label><Select value={form.accessMode} onChange={(e) => set('accessMode', e.target.value)}><option value="legacy-per-share">Legacy per-share credentials</option><option value="centralized">Centralized users and groups</option></Select></FormGroup>
-          {form.accessMode === 'centralized' && <>
-            <FormGroup><Label>SMB User IDs</Label><Input value={form.smbUserIds} onChange={(e) => set('smbUserIds', e.target.value)} placeholder={userOptions.map((u) => u.id).join(', ') || 'user-id-1, user-id-2'} /></FormGroup>
-            <FormGroup><Label>SMB Group IDs</Label><Input value={form.smbGroupIds} onChange={(e) => set('smbGroupIds', e.target.value)} placeholder={groupOptions.map((g) => g.id).join(', ') || 'group-id-1'} /></FormGroup>
-            <FormGroup><Label>SFTP User IDs</Label><Input value={form.sftpUserIds} onChange={(e) => set('sftpUserIds', e.target.value)} /></FormGroup>
-            <FormGroup><Label>SFTP Group IDs</Label><Input value={form.sftpGroupIds} onChange={(e) => set('sftpGroupIds', e.target.value)} /></FormGroup>
-          </>}
-          {form.accessMode === 'legacy-per-share' && <>
-            <FormGroup><Label>SMB Username</Label><Input value={form.smbUsername} onChange={(e) => set('smbUsername', e.target.value)} placeholder={isEdit ? '' : 'Auto-generated if empty'} required={isEdit} /></FormGroup>
-            <FormGroup><Label>SMB Password</Label><Input value={form.smbPassword} onChange={(e) => set('smbPassword', e.target.value)} placeholder={isEdit ? '' : 'Auto-generated if empty'} required={isEdit} /></FormGroup>
-            <FormGroup><Label>SFTP Username</Label><Input value={form.sftpUsername} onChange={(e) => set('sftpUsername', e.target.value)} placeholder={isEdit ? '' : 'Auto-generated if empty'} required={isEdit} /></FormGroup>
-            <FormGroup><Label>SFTP Password</Label><Input value={form.sftpPassword} onChange={(e) => set('sftpPassword', e.target.value)} placeholder={isEdit ? '' : 'Auto-generated if empty'} required={isEdit} /></FormGroup>
-          </>}
-        </FormGrid>
-        <div className="flex flex-wrap gap-x-6 gap-y-2 mt-3">
-          <Checkbox label="Apply SMB share configuration immediately" checked={form.applySamba} onChange={(v) => set('applySamba', v)} />
-          <Checkbox label="Apply SFTP access configuration immediately" checked={form.applySftp} onChange={(v) => set('applySftp', v)} />
+      {isLegacy && (
+        <>
+          <FormGroup label="SMB Username" htmlFor={`${idPrefix}-smb-user`}>
+            <Input
+              id={`${idPrefix}-smb-user`}
+              type="text"
+              value={form.smbUsername}
+              onChange={(e) => onChange({ smbUsername: e.target.value })}
+              placeholder="Auto-generated if empty"
+            />
+          </FormGroup>
+          <FormGroup label="SMB Password" htmlFor={`${idPrefix}-smb-pass`}>
+            <Input
+              id={`${idPrefix}-smb-pass`}
+              type="text"
+              value={form.smbPassword}
+              onChange={(e) => onChange({ smbPassword: e.target.value })}
+              placeholder="Auto-generated if empty"
+            />
+          </FormGroup>
+          <FormGroup label="SFTP Username" htmlFor={`${idPrefix}-sftp-user`}>
+            <Input
+              id={`${idPrefix}-sftp-user`}
+              type="text"
+              value={form.sftpUsername}
+              onChange={(e) => onChange({ sftpUsername: e.target.value })}
+              placeholder="Auto-generated if empty"
+            />
+          </FormGroup>
+          <FormGroup label="SFTP Password" htmlFor={`${idPrefix}-sftp-pass`}>
+            <Input
+              id={`${idPrefix}-sftp-pass`}
+              type="text"
+              value={form.sftpPassword}
+              onChange={(e) => onChange({ sftpPassword: e.target.value })}
+              placeholder="Auto-generated if empty"
+            />
+          </FormGroup>
+        </>
+      )}
+
+      {smbEnabled && (
+        <div className="sm:col-span-2">
+          <Checkbox
+            id={`${idPrefix}-apply-samba`}
+            checked={form.applySamba}
+            onChange={(v) => onChange({ applySamba: v })}
+            label="Apply Samba share configuration immediately"
+          />
         </div>
-        <FormActions>
-          <Button variant="primary" type="submit" disabled={busy}><Check className="h-3.5 w-3.5" /> {isEdit ? 'Save Share' : 'Create Share'}</Button>
-          <Button variant="ghost" type="button" onClick={() => { if (isEdit) { setEditId(''); setEditForm(DEFAULT_DISK_FORM); } else setShowAdd(false); }}>Cancel</Button>
-        </FormActions>
-      </form>
-    );
+      )}
+      {sftpEnabled && (
+        <div className="sm:col-span-2">
+          <Checkbox
+            id={`${idPrefix}-apply-sftp`}
+            checked={form.applySftp}
+            onChange={(v) => onChange({ applySftp: v })}
+            label="Apply SFTP access configuration immediately"
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function SharesTab({
+  shares,
+  mounts,
+  mountOptions,
+  userOptions,
+  groupOptions,
+  showAddDrive,
+  onToggleAdd,
+  diskForm,
+  onDiskFormChange,
+  onCreateDisk,
+  editingDiskId,
+  editingDiskForm,
+  onEditingDiskFormChange,
+  onStartEdit,
+  onCancelEdit,
+  onUpdateDisk,
+  onDiskAction,
+  submitting,
+  smbEnabled,
+  sftpEnabled,
+  onNotice,
+  onError,
+}: SharesTabProps) {
+  const handleCopy = (value: string, label: string) => {
+    copyToClipboard(value)
+      .then(() => onNotice('Copied!'))
+      .catch(() => onError('Copy failed'));
   };
 
   return (
-    <div className="animate-[fade-in_0.2s_ease]">
-      <PageHeader title="Shares" description="Manage SMB Mac Shares, Time Machine destinations, and secondary protocol access." />
-      <SectionHeader>
-        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{shares.length} Share{shares.length !== 1 ? 's' : ''} Configured</h3>
-        <Button variant="primary" size="sm" onClick={() => setShowAdd(!showAdd)}><Plus className="h-3.5 w-3.5" /> Add Share</Button>
-      </SectionHeader>
+    <div className="animate-in">
+      <PageHeader
+        title="Shares"
+        description="Manage SMB shares and Time Machine destinations"
+        actions={
+          <Button variant="primary" onClick={onToggleAdd}>
+            <Plus className="h-4 w-4" />
+            Add Share
+          </Button>
+        }
+      />
 
-      {showAdd && (
-        <Card className="mb-4 animate-[fade-in_0.2s_ease]">
-          <CardHeader><h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2"><Plus className="h-4 w-4 text-blue-500" /> Create New Share</h3></CardHeader>
-          <CardBody>{renderForm(diskForm, setDiskForm, handleCreate, false)}</CardBody>
+      {showAddDrive && (
+        <Card className="mb-6">
+          <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100 mb-4">
+            Create New Share
+          </h3>
+          <form onSubmit={onCreateDisk}>
+            <DiskFormFields
+              form={diskForm}
+              onChange={onDiskFormChange}
+              mountOptions={mountOptions}
+              userOptions={userOptions}
+              groupOptions={groupOptions}
+              idPrefix="create-disk"
+              smbEnabled={smbEnabled}
+              sftpEnabled={sftpEnabled}
+            />
+            <div className="flex flex-wrap gap-2 pt-4 mt-4 border-t border-gray-100 dark:border-gray-800">
+              <Button type="submit" variant="primary" disabled={submitting}>
+                Create Share
+              </Button>
+              <Button type="button" variant="ghost" onClick={onToggleAdd}>
+                Cancel
+              </Button>
+            </div>
+          </form>
         </Card>
       )}
 
       {shares.length === 0 ? (
-        <Card><EmptyState icon={<HardDrive className="h-10 w-10 mx-auto" />} title="No shares configured" description="Create your first SMB Mac Share, then enable Time Machine only where you need it." /></Card>
+        <Card>
+          <EmptyState
+            icon={<HardDrive className="h-12 w-12" />}
+            title="No shares configured"
+            description="Create your first SMB share, then enable Time Machine only where you need it."
+          />
+        </Card>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-4">
           {shares.map((disk) => {
-            const isEditing = editId === disk.id;
+            const isEditing = editingDiskId === disk.id;
+            const smbShareName = disk.smbShareName || disk?.smb?.shareName || '';
+            const smbUrl = disk.diskShareUrl || disk?.smb?.url || '';
+            const browseUrl = disk.rootShareUrl || disk?.smb?.rootUrl || '';
+            const tmStatus =
+              disk.timeMachineEnabled === true || disk?.smb?.timeMachineEnabled
+                ? 'Enabled'
+                : 'Disabled';
+            const accessMode = disk.accessMode || disk?.access?.mode || 'legacy-per-share';
+            const sftpUrl = disk.sftpUrl || disk?.sftp?.url || '';
+            const sftpPath = disk.sftpPath || disk?.sftp?.path || '';
+            const users = disk?.access?.users?.map((u) => u.username).join(', ') || 'N/A';
+            const groups = disk?.access?.groups?.map((g) => g.name).join(', ') || 'N/A';
+            const storagePath = disk.storagePath || disk.storageBasePath || '';
+
             return (
               <Card key={disk.id}>
-                <CardHeader>
+                <div className="mb-4">
                   <div className="flex items-center gap-2">
-                    <HardDrive className="h-4 w-4 text-slate-400" />
-                    <span className="font-semibold text-sm text-slate-900 dark:text-slate-100">{disk.name}</span>
-                    <Badge tone="muted">{disk.smbShareName}</Badge>
-                    {(disk.timeMachineEnabled || disk?.smb?.timeMachineEnabled) && <Badge tone="info" dot>Time Machine</Badge>}
+                    <HardDrive className="h-5 w-5 text-gray-500 dark:text-gray-400" />
+                    <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">
+                      {disk.name}
+                    </h3>
                   </div>
-                  {!isEditing && <Button size="sm" onClick={() => startEdit(disk)} disabled={busy}><Pencil className="h-3 w-3" /> Edit</Button>}
-                </CardHeader>
+                  {smbShareName && (
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                      {smbShareName}
+                    </p>
+                  )}
+                </div>
+
                 {isEditing ? (
-                  <CardBody>{renderForm(editForm, setEditForm, handleUpdate, true)}</CardBody>
+                  <form onSubmit={onUpdateDisk}>
+                    <DiskFormFields
+                      form={editingDiskForm}
+                      onChange={onEditingDiskFormChange}
+                      mountOptions={mountOptions}
+                      userOptions={userOptions}
+                      groupOptions={groupOptions}
+                      idPrefix={`edit-disk-${disk.id}`}
+                      smbEnabled={smbEnabled}
+                      sftpEnabled={sftpEnabled}
+                    />
+                    <div className="flex flex-wrap gap-2 pt-4 mt-4 border-t border-gray-100 dark:border-gray-800">
+                      <Button type="submit" variant="primary" disabled={submitting}>
+                        Save Share
+                      </Button>
+                      <Button type="button" variant="ghost" onClick={onCancelEdit}>
+                        Cancel
+                      </Button>
+                    </div>
+                  </form>
                 ) : (
                   <>
-                    <CardBody>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                        <InfoItem label="SMB Share URL" value={disk.diskShareUrl || disk?.smb?.url || ''} />
-                        <InfoItem label="Browse URL" value={disk.rootShareUrl || disk?.smb?.rootUrl || ''} />
-                        <InfoItem label="Access Mode" value={disk.accessMode || disk?.access?.mode || 'legacy-per-share'} />
-                        <InfoItem label="SFTP URL" value={disk.sftpUrl || disk?.sftp?.url || ''} />
-                        <InfoItem label="Assigned Users" value={disk?.access?.users?.map((u) => u.username).join(', ') || 'N/A'} mono={false} />
-                        <InfoItem label="Storage Path" value={disk.storagePath || ''} />
-                      </div>
-                    </CardBody>
-                    <CardFooter>
-                      <Button size="sm" onClick={() => cp('SMB URL', disk.diskShareUrl)}><Copy className="h-3 w-3" /> SMB URL</Button>
-                      <Button size="sm" onClick={() => cp('SFTP URL', disk.sftpUrl)}><Copy className="h-3 w-3" /> SFTP URL</Button>
-                      <Button size="sm" onClick={() => cp('SMB password', disk.smbPassword)}><Copy className="h-3 w-3" /> Password</Button>
-                      <Button size="sm" onClick={() => action(disk.id, 'rotate')} disabled={busy}><Key className="h-3 w-3" /> Rotate SMB</Button>
-                      <Button size="sm" onClick={() => action(disk.id, 'rotate-sftp')} disabled={busy}><Key className="h-3 w-3" /> Rotate SFTP</Button>
-                      <Button size="sm" onClick={() => action(disk.id, 'apply')} disabled={busy || !smbEnabled}><Wrench className="h-3 w-3" /> Apply Samba</Button>
-                      <Button size="sm" onClick={() => action(disk.id, 'apply-sftp')} disabled={busy || !sftpEnabled}><Wrench className="h-3 w-3" /> Apply SFTP</Button>
-                      <Button size="sm" variant="danger" onClick={() => action(disk.id, 'delete')} disabled={busy}><Trash2 className="h-3 w-3" /> Delete</Button>
-                    </CardFooter>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      <InfoItem label="SMB URL" value={smbUrl} mono />
+                      <InfoItem label="Browse URL" value={browseUrl} mono />
+                      <InfoItem label="Time Machine" value={tmStatus} />
+                      <InfoItem label="Access Mode" value={accessMode} />
+                      <InfoItem label="SFTP URL" value={sftpUrl} mono />
+                      <InfoItem label="SFTP Path" value={sftpPath} mono />
+                      <InfoItem label="Users" value={users} />
+                      <InfoItem label="Groups" value={groups} />
+                      <InfoItem label="Storage Path" value={storagePath} mono />
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 pt-4 mt-4 border-t border-gray-100 dark:border-gray-800">
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() =>
+                          handleCopy(smbConfigTextForDisk(disk), 'SMB config')
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy SMB Config
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() =>
+                          handleCopy(sftpConfigTextForDisk(disk), 'SFTP config')
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy SFTP Config
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() => handleCopy(smbUrl, 'SMB URL')}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy URL
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() =>
+                          handleCopy(
+                            disk.smbUsername || disk?.smb?.legacyUsername || '',
+                            'Username'
+                          )
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy Username
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="default"
+                        size="sm"
+                        onClick={() =>
+                          handleCopy(
+                            disk.smbPassword || disk?.smb?.legacyPassword || '',
+                            'Password'
+                          )
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copy Password
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => onStartEdit(disk)}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        Edit
+                      </Button>
+                      {smbEnabled && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDiskAction(disk.id, 'rotate')}
+                        >
+                          <Key className="h-3.5 w-3.5" />
+                          Rotate Password
+                        </Button>
+                      )}
+                      {smbEnabled && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDiskAction(disk.id, 'apply')}
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                          Apply Samba
+                        </Button>
+                      )}
+                      {sftpEnabled && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => onDiskAction(disk.id, 'apply-sftp')}
+                        >
+                          <Settings2 className="h-3.5 w-3.5" />
+                          Apply SFTP
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        variant="danger"
+                        size="sm"
+                        onClick={() => onDiskAction(disk.id, 'delete')}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Delete
+                      </Button>
+                    </div>
                   </>
                 )}
               </Card>

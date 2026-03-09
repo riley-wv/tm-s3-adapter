@@ -1,6 +1,9 @@
-export async function api<T = unknown>(path: string, options: RequestInit & { body?: string } = {}): Promise<T> {
+export async function api<T = unknown>(
+  path: string,
+  options: RequestInit & { body?: string } = {},
+): Promise<T> {
   const headers: Record<string, string> = {
-    ...(options.headers as Record<string, string> || {}),
+    ...((options.headers as Record<string, string>) || {}),
   };
   if (options.body !== undefined && !headers['content-type']) {
     headers['content-type'] = 'application/json';
@@ -10,13 +13,29 @@ export async function api<T = unknown>(path: string, options: RequestInit & { bo
   const text = await res.text();
   let payload: T | null = null;
   if (text) {
-    try { payload = JSON.parse(text); } catch { payload = null; }
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = null;
+    }
   }
 
   if (!res.ok) {
     const err = payload as Record<string, string> | null;
-    throw new Error(err?.error || err?.message || `Request failed (${res.status})`);
+    throw new Error(
+      err?.error || err?.message || `Request failed (${res.status})`,
+    );
   }
 
   return payload as T;
+}
+
+export function parseEventData<T = unknown>(
+  event: MessageEvent | { data?: string },
+): T | null {
+  try {
+    return JSON.parse((event as MessageEvent)?.data || '{}');
+  } catch {
+    return null;
+  }
 }

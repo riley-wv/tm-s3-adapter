@@ -1,69 +1,78 @@
-'use client';
-
-import { HardDrive } from 'lucide-react';
-import { Button, Input, Label, FormGroup, Banner, Spinner } from './ui';
+import { type FormEvent, useState } from 'react';
+import { HardDrive, AlertCircle } from 'lucide-react';
+import { Button, Input, Label } from './ui';
 
 interface LoginPageProps {
-  loginForm: { username: string; password: string };
-  setLoginForm: React.Dispatch<React.SetStateAction<{ username: string; password: string }>>;
-  onSubmit: (e: React.FormEvent) => void;
-  submitting: boolean;
+  onLogin: (username: string, password: string) => Promise<void>;
   error: string;
-  sessionLoading?: boolean;
+  submitting: boolean;
 }
 
-export function LoginPage({ loginForm, setLoginForm, onSubmit, submitting, error, sessionLoading }: LoginPageProps) {
-  if (sessionLoading) {
-    return (
-      <main className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950">
-        <div className="text-center">
-          <Spinner className="mx-auto mb-3" />
-          <p className="text-sm text-slate-500 dark:text-slate-400">Loading session...</p>
-        </div>
-      </main>
-    );
-  }
+export function LoginPage({ onLogin, error, submitting }: LoginPageProps) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    await onLogin(username, password);
+    setPassword('');
+  };
 
   return (
-    <main className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 p-6">
-      <div className="w-full max-w-sm animate-[fade-in_0.3s_ease]">
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-lg p-8">
-          <div className="text-center mb-6">
-            <div className="mx-auto mb-4 h-12 w-12 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center shadow-md">
-              <HardDrive className="h-6 w-6 text-white" />
-            </div>
-            <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">TM Adapter</h1>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">Sign in to manage your Time Machine backups</p>
+    <main className="min-h-screen flex items-center justify-center px-4 bg-gray-50 dark:bg-gray-950">
+      <div className="w-full max-w-sm animate-in">
+        <div className="bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-2xl p-8 shadow-lg text-center">
+          <div className="mx-auto mb-5 h-14 w-14 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center shadow-md">
+            <HardDrive className="h-7 w-7 text-white" />
           </div>
+          <h1 className="text-lg font-bold tracking-tight text-gray-900 dark:text-gray-100 mb-1">
+            TM Adapter
+          </h1>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-6">
+            Sign in to manage your Time Machine backups
+          </p>
 
-          {error && <div className="mb-4"><Banner variant="error">{error}</Banner></div>}
+          {error && (
+            <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 rounded-lg px-3 py-2.5 mb-4 text-left">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
 
-          <form onSubmit={onSubmit} className="space-y-4">
-            <FormGroup>
+          <form onSubmit={handleSubmit} className="text-left space-y-4">
+            <div>
               <Label htmlFor="username">Username</Label>
               <Input
                 id="username"
                 type="text"
-                value={loginForm.username}
-                onChange={(e) => setLoginForm((p) => ({ ...p, username: e.target.value }))}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
                 placeholder="admin"
                 required
+                autoComplete="username"
               />
-            </FormGroup>
+            </div>
 
-            <FormGroup>
+            <div>
               <Label htmlFor="password">Password</Label>
               <Input
                 id="password"
                 type="password"
-                value={loginForm.password}
-                onChange={(e) => setLoginForm((p) => ({ ...p, password: e.target.value }))}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
                 placeholder="Enter your password"
                 required
+                autoComplete="current-password"
               />
-            </FormGroup>
+            </div>
 
-            <Button variant="primary" size="lg" type="submit" disabled={submitting} className="w-full">
+            <Button
+              type="submit"
+              variant="primary"
+              size="lg"
+              fullWidth
+              loading={submitting}
+            >
               {submitting ? 'Signing in...' : 'Sign in'}
             </Button>
           </form>
